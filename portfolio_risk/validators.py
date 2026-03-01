@@ -10,6 +10,10 @@ Validation pipeline order:
     2. validate_weights() — checks weights against surviving assets, renormalizes if needed
 """
 
+from __future__ import annotations
+
+from __future__ import annotations
+
 import polars as pl
 
 from portfolio_risk.models import (
@@ -28,6 +32,10 @@ from portfolio_risk.models import (
 # 5% means if an asset has NaN in more than 1 out of every 20 days, it's unreliable.
 NAN_THRESHOLD: float = 0.05
 
+# Minimum number of rows required to compute statistics.
+# Standard deviation with ddof=1 requires at least 2 data points.
+MIN_ROWS: int = 2
+
 # Floating point tolerance for weight sum check.
 # 1/3 + 1/3 + 1/3 = 0.9999999999999999 in Python, so we need a small tolerance.
 WEIGHT_SUM_TOLERANCE: float = 1e-6
@@ -43,10 +51,12 @@ def validate_data(raw_df: pl.DataFrame) -> DataValidationResult:
 
     Steps:
         1. Check DataFrame is not empty
-        2. Exclude non-numeric columns (except 'date' which is expected)
-        3. Drop assets (columns) with >5% NaN values — warn user
-        4. Fill remaining NaNs with 0.0 (assume no price movement)
-        5. Wrap in ReturnsData container
+        2. Check minimum row count (need >= 2 for standard deviation)
+        3. Identify all non-date columns, separate numeric from non-numeric
+        4. Check for columns that are entirely NaN (Polars may type them as Null)
+        5. Drop assets (columns) with >5% NaN values — warn user
+        6. Fill remaining NaNs with 0.0 (assume no price movement)
+        7. Wrap in ReturnsData container
 
     Missing data assumption: NaN values below the threshold are filled with 0.0,
     which assumes no price movement on that day. This is the correct return for
@@ -68,16 +78,60 @@ def validate_data(raw_df: pl.DataFrame) -> DataValidationResult:
             message="DataFrame is empty (no rows or no columns).",
         )
 
-    # --- Check 2: Keep only numeric columns ---
-    # Polars note: .select(cs.numeric()) selects only numeric columns.
-    # We use a manual approach for clarity: check each column's dtype.
-    # 'date' column is expected and always excluded from asset data.
+    # --- Check 2: Need at least 2 rows for statistics ---
+    # Standard deviation with ddof=1 requires n >= 2, otherwise division by zero.
+    # With only 1 row, variance, volatility, and Sharpe ratio are all undefined.
+    if raw_df.height < MIN_ROWS:
+        return DataValidationResult(
+            is_valid=False,
+            data=None,
+            message=f"Need at least {MIN_ROWS} rows to compute statistics, got {raw_df.height}.",
+        )
+
+    # --- Check 3: Identify asset columns ---
+    # Separate non-date columns into numeric and non-numeric.
+    # Polars note: columns that are entirely NaN from a CSV may be loaded as
+    # Null type (not Float64), so they won't pass .is_numeric(). We need to
+    # detect these separately and treat them as 100% NaN assets.
+    messages = []
+    non_date_columns = tuple(col for col in raw_df.columns if col != "date")
+
     numeric_columns = tuple(
-        col for col in raw_df.columns
-        if col != "date" and raw_df[col].dtype.is_numeric()
+        col for col in non_date_columns
+        if raw_df[col].dtype.is_numeric()
     )
 
+    # Columns that are entirely null get a Null dtype in Polars — not numeric.
+    # These are effectively 100% NaN assets and should be reported as dropped.
+    null_columns = tuple(
+        col for col in non_date_columns
+        if raw_df[col].dtype == pl.Null or (
+            not raw_df[col].dtype.is_numeric()
+            and col not in numeric_columns
+            and raw_df[col].null_count() == raw_df.height
+        )
+    )
+
+    # Columns that are non-numeric and not null (e.g., string columns like "notes")
+    excluded_non_numeric = tuple(
+        col for col in non_date_columns
+        if col not in numeric_columns and col not in null_columns
+    )
+
+    if len(null_columns) > 0:
+        messages.append(
+            f"Dropped assets with no valid data (100% NaN): "
+            f"{', '.join(null_columns)}."
+        )
+
     if len(numeric_columns) == 0:
+        # If there were null columns, mention them in the failure message
+        if len(null_columns) > 0:
+            return DataValidationResult(
+                is_valid=False,
+                data=None,
+                message=f"No valid asset columns. {messages[0]}",
+            )
         return DataValidationResult(
             is_valid=False,
             data=None,
@@ -86,10 +140,9 @@ def validate_data(raw_df: pl.DataFrame) -> DataValidationResult:
 
     # Create a new DataFrame with only numeric asset columns.
     # Polars note: .select() returns a NEW DataFrame (immutable operation).
-    # In pandas this would be df[numeric_columns], which also creates a view/copy.
     numeric_df = raw_df.select(numeric_columns)
 
-    # --- Check 3: Identify and drop assets with too many NaNs ---
+    # --- Check 4: Identify and drop assets with too many NaNs ---
     # Count NaN fraction per column
     nan_fractions = {
         col: numeric_df[col].null_count() / numeric_df.height
@@ -106,9 +159,6 @@ def validate_data(raw_df: pl.DataFrame) -> DataValidationResult:
         col for col in numeric_columns
         if col not in assets_to_drop
     )
-
-    # Build warning messages
-    messages = []
 
     if len(assets_to_drop) > 0:
         drop_details = ", ".join(
@@ -128,7 +178,7 @@ def validate_data(raw_df: pl.DataFrame) -> DataValidationResult:
     # Keep only surviving assets
     clean_df = numeric_df.select(assets_to_keep)
 
-    # --- Check 4: Fill remaining NaNs with 0.0 ---
+    # --- Check 5: Fill remaining NaNs with 0.0 ---
     # Count remaining NaNs before filling
     # Polars note: .null_count() returns count of null/NaN per column.
     # .sum_horizontal() sums across columns into a single value.
@@ -137,7 +187,6 @@ def validate_data(raw_df: pl.DataFrame) -> DataValidationResult:
     if remaining_nans > 0:
         # Polars note: .fill_null(0.0) returns a NEW DataFrame with NaNs replaced.
         # The original clean_df is not modified (immutability).
-        # In pandas you'd use df.fillna(0.0), which can modify in place or return new.
         clean_df = clean_df.fill_null(0.0)
         messages.append(f"Filled {remaining_nans} NaN values with 0.0 (assumed no price movement).")
 

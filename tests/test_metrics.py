@@ -13,7 +13,6 @@ Convention: Max drawdown is expressed as a negative number (e.g., -0.15 = 15% dr
 import pytest
 import polars as pl
 
-# These imports WILL FAIL until we create metrics.py — that's the point of Red phase.
 from portfolio_risk.metrics import (
     compute_portfolio_variance,
     compute_annualized_return,
@@ -43,7 +42,7 @@ def basic_returns() -> pl.DataFrame:
 
 
 @pytest.fixture
-def basic_weights() -> tuple[float, ...]:
+def basic_weights() -> tuple:
     """60/40 allocation across 2 assets."""
     return (0.6, 0.4)
 
@@ -104,6 +103,13 @@ class TestPortfolioVariance:
         # Just verifying it runs and returns a positive number
         result = compute_portfolio_variance(basic_returns, (0.5, 0.5))
         assert result > 0.0
+
+    def test_negative_weights_short_position(self, basic_returns):
+        """Negative weights (short positions) should still produce valid variance."""
+        # Long ASSET_01, short ASSET_02. Reuses basic_returns fixture.
+        weights = (1.2, -0.2)
+        result = compute_portfolio_variance(basic_returns, weights)
+        assert result > 0.0  # variance is always non-negative
 
 
 # ============================================================
@@ -166,6 +172,29 @@ class TestSharpeRatio:
         result = compute_sharpe_ratio(zero_returns, (0.5, 0.5), risk_free_rate=0.0)
         assert result == 0.0
 
+    def test_negative_average_return(self):
+        """If portfolio loses money on average, Sharpe should be negative."""
+        returns = pl.DataFrame({
+            "ASSET_01": [-0.02, -0.03, 0.01, -0.04, -0.01],
+        })
+        result = compute_sharpe_ratio(returns, (1.0,), risk_free_rate=0.0)
+        assert result < 0.0
+
+    def test_returns_below_risk_free_rate(self):
+        """Positive returns below risk-free rate should give negative Sharpe."""
+        returns = pl.DataFrame({
+            "ASSET_01": [0.0001, 0.0002, 0.0001, 0.0003, 0.0001],
+        })
+        # Very small positive returns, but risk-free rate is much higher
+        result = compute_sharpe_ratio(returns, (1.0,), risk_free_rate=0.10)
+        assert result < 0.0
+
+    def test_negative_weights_short_position(self, basic_returns):
+        """Sharpe ratio should work with short positions."""
+        weights = (1.2, -0.2)
+        result = compute_sharpe_ratio(basic_returns, weights, risk_free_rate=0.0)
+        assert isinstance(result, float)
+
 
 # ============================================================
 # Max Drawdown Tests
@@ -206,6 +235,34 @@ class TestMaxDrawdown:
         """Zero returns: no movement, no drawdown."""
         result = compute_max_drawdown(zero_returns, (0.5, 0.5))
         assert result == 0.0
+
+    def test_recovery_then_worse_drawdown(self):
+        """
+        Two drawdowns: first -15%, recovery to new peak, then -25%.
+        Should find the worst one.
+
+        Wealth trace:
+            Day 1: +10%  → 1.100 (peak: 1.100)
+            Day 2: -15%  → 0.935 (dd: -15.0%)
+            Day 3: +20%  → 1.122 (new peak: 1.122)
+            Day 4: -25%  → 0.842 (dd: -25.0% from peak — this is the worst)
+            Day 5: +5%   → 0.884
+        """
+        returns = pl.DataFrame({
+            "ASSET_01": [0.10, -0.15, 0.20, -0.25, 0.05],
+        })
+        result = compute_max_drawdown(returns, (1.0,))
+        # Second drawdown is worse: (0.8415 - 1.122) / 1.122 = -0.25
+        assert result == pytest.approx(-0.25, rel=1e-3)
+        assert result < -0.20  # worse than the first -15% drawdown
+
+    def test_total_loss(self):
+        """A return of -100% means total loss. Drawdown should be -1.0."""
+        returns = pl.DataFrame({
+            "ASSET_01": [0.05, -1.0, 0.05],
+        })
+        result = compute_max_drawdown(returns, (1.0,))
+        assert result == pytest.approx(-1.0)
 
 
 # ============================================================
@@ -267,3 +324,32 @@ class TestCorrelationMatrix:
         result = compute_correlation_matrix(single_asset_returns)
         assert len(result) == 1
         assert result[0][0] == pytest.approx(1.0)
+
+
+# ============================================================
+# Large Dataset Tests
+# ============================================================
+# Verifies metrics work at realistic scale, not just tiny test data.
+
+class TestLargeDataset:
+
+    def test_five_years_of_data(self):
+        """1260 days (~5 years) should compute without errors."""
+        import numpy as np
+        rng = np.random.default_rng(42)
+        n_days = 1260
+        data = {
+            "ASSET_01": rng.normal(0.0003, 0.01, n_days).tolist(),
+            "ASSET_02": rng.normal(0.0002, 0.015, n_days).tolist(),
+            "ASSET_03": rng.normal(0.0001, 0.02, n_days).tolist(),
+        }
+        returns = pl.DataFrame(data)
+        weights = (0.5, 0.3, 0.2)
+
+        variance = compute_portfolio_variance(returns, weights)
+        sharpe = compute_sharpe_ratio(returns, weights)
+        drawdown = compute_max_drawdown(returns, weights)
+
+        assert variance > 0.0
+        assert isinstance(sharpe, float)
+        assert drawdown <= 0.0

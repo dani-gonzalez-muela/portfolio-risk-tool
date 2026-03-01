@@ -6,6 +6,7 @@ Validators use the FP approach: return result objects instead of raising excepti
 
 Data validation rules:
     - Reject empty DataFrames
+    - Reject DataFrames with fewer than 2 rows (can't compute statistics)
     - Reject non-numeric columns
     - Drop assets with >5% NaN values (warn user)
     - Fill remaining NaNs with 0.0 (assume no price movement)
@@ -19,7 +20,6 @@ Weight validation rules:
 import pytest
 import polars as pl
 
-# These imports WILL FAIL until we create validators.py — Red phase.
 from portfolio_risk.validators import validate_data, validate_weights
 
 
@@ -111,6 +111,16 @@ class TestValidateData:
         assert result.is_valid is False
         assert result.data is None
 
+    def test_single_row_rejected(self):
+        """Single row of data is not enough to compute statistics (need >= 2).
+        With ddof=1, standard deviation is undefined for n=1."""
+        single_row = pl.DataFrame({
+            "ASSET_01": [0.01],
+            "ASSET_02": [0.02],
+        })
+        result = validate_data(single_row)
+        assert result.is_valid is False
+
     def test_non_numeric_column_excluded(self):
         """Non-numeric columns (other than 'date') should be excluded."""
         df = pl.DataFrame({
@@ -122,6 +132,12 @@ class TestValidateData:
         assert result.is_valid is True
         assert "notes" not in result.data.asset_names
         assert "ASSET_01" in result.data.asset_names
+
+    def test_only_date_column_fails(self):
+        """CSV with only a date column and no asset data should fail."""
+        df = pl.DataFrame({"date": ["2023-01-01", "2023-01-02"]})
+        result = validate_data(df)
+        assert result.is_valid is False
 
     def test_few_nans_filled_with_zero(self, data_with_few_nans):
         """NaNs below 5% threshold should be filled with 0.0."""
@@ -142,6 +158,18 @@ class TestValidateData:
         assert "ASSET_01" in result.data.asset_names
         assert "ASSET_03" in result.data.asset_names
         # Warning should mention the dropped asset
+        assert "ASSET_02" in result.message
+
+    def test_all_nan_column_dropped(self):
+        """A column that is 100% NaN should be dropped and mentioned in message."""
+        df = pl.DataFrame({
+            "date": [f"2023-01-{i:02d}" for i in range(1, 21)],
+            "ASSET_01": [0.01] * 20,
+            "ASSET_02": [None] * 20,  # 100% NaN — should be dropped
+        })
+        result = validate_data(df)
+        assert result.is_valid is True
+        assert "ASSET_02" not in result.data.asset_names
         assert "ASSET_02" in result.message
 
     def test_all_assets_dropped_fails(self):
