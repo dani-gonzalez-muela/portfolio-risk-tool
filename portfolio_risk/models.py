@@ -10,7 +10,7 @@ Instead, new instances are created at each pipeline stage:
         → WeightValidationResult (validated weights)
         → RiskMetrics (output)
 """
-
+from __future__ import annotations
 from dataclasses import dataclass
 import polars as pl
 
