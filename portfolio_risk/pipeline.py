@@ -196,12 +196,14 @@ def run_pipeline(
     metrics: RiskMetrics = compute_all_metrics(data_result.data, weight_result.config)
 
     # Step 6: Convert to JSON-serializable dict (pure)
-    # Collect any warnings from validation steps
-    warnings = []
-    if "dropped" in data_result.message.lower() or "filled" in data_result.message.lower():
-        warnings.append(data_result.message)
-    if "renormalize" in weight_result.message.lower() or "adjusted" in weight_result.message.lower():
-        warnings.append(weight_result.message)
+    # Collect warnings using tuple concatenation (no mutable list)
+    warnings = tuple(
+        msg for msg, condition in (
+            (data_result.message, "dropped" in data_result.message.lower() or "filled" in data_result.message.lower()),
+            (weight_result.message, "renormalize" in weight_result.message.lower() or "adjusted" in weight_result.message.lower()),
+        )
+        if condition
+    )
 
     return {
         "status": "success",

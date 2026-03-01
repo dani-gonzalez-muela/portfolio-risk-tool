@@ -102,16 +102,16 @@ class TestPortfolioVariance:
 
     def test_equal_weights(self, basic_returns):
         """Equal weighting across assets."""
-        # Just verifying it runs and returns a positive number
         result = compute_portfolio_variance(basic_returns, (0.5, 0.5))
-        assert result > 0.0
+        # Hand-calculated: daily var with equal weights, annualized
+        assert result == pytest.approx(0.060375, rel=1e-4)
 
     def test_negative_weights_short_position(self, basic_returns):
         """Negative weights (short positions) should still produce valid variance."""
-        # Long ASSET_01, short ASSET_02. Reuses basic_returns fixture.
         weights = (1.2, -0.2)
         result = compute_portfolio_variance(basic_returns, weights)
-        assert result > 0.0  # variance is always non-negative
+        # Short positions increase variance due to leverage
+        assert result == pytest.approx(0.09610, rel=1e-4)
 
 
 # ============================================================
@@ -195,7 +195,8 @@ class TestSharpeRatio:
         """Sharpe ratio should work with short positions."""
         weights = (1.2, -0.2)
         result = compute_sharpe_ratio(basic_returns, weights, risk_free_rate=0.0)
-        assert isinstance(result, float)
+        # Leveraged long/short position amplifies both return and risk
+        assert result == pytest.approx(9.755, rel=1e-3)
 
 
 # ============================================================
@@ -352,9 +353,10 @@ class TestLargeDataset:
         sharpe = compute_sharpe_ratio(returns, weights)
         drawdown = compute_max_drawdown(returns, weights)
 
-        assert variance > 0.0
-        assert isinstance(sharpe, float)
-        assert drawdown <= 0.0
+        # Seeded RNG (seed=42) gives deterministic values we can verify
+        assert variance == pytest.approx(0.01589, rel=1e-2)
+        assert sharpe == pytest.approx(0.037, rel=1e-1)
+        assert drawdown == pytest.approx(-0.3208, rel=1e-2)
 
 
 # ============================================================
