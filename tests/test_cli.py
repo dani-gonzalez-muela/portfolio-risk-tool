@@ -15,12 +15,15 @@ from portfolio_risk.cli import build_parser, main
 
 class TestBuildParser:
 
-    def test_required_args(self):
-        """Parser should require --csv and --weights."""
-        parser = build_parser()
-        # Missing required args should raise SystemExit
-        with pytest.raises(SystemExit):
-            parser.parse_args([])
+    def test_no_args_prints_error(self, capsys, monkeypatch):
+        """Running with no arguments should print a helpful error."""
+        monkeypatch.setattr(sys, "argv", ["portfolio_risk"])
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+        output = json.loads(capsys.readouterr().out)
+        assert output["status"] == "error"
+        assert "--config" in output["message"]
 
     def test_parses_basic_args(self):
         """Parser should correctly parse csv, weights, and risk-free-rate."""
@@ -71,7 +74,7 @@ class TestMain:
         df.write_csv(str(csv_path))
 
         monkeypatch.setattr(sys, "argv", [
-            "portfolio_risk", "--csv", str(csv_path), "--weights", "0.6", "0.4",
+            "portfolio_risk", "--csv", str(csv_path), "--weights", "0.6", "0.4", "--json",
         ])
         main()
 
@@ -104,3 +107,56 @@ class TestMain:
         # Should tell the user how many assets were found
         assert "3" in output["message"]
         assert "2" in output["message"]
+
+    def test_config_file_mode(self, capsys, monkeypatch, tmp_path):
+        """--config should load CSV path and weights from a JSON file."""
+        import polars as pl
+
+        # Create temp CSV
+        csv_path = tmp_path / "test.csv"
+        df = pl.DataFrame({
+            "date": ["2023-01-01", "2023-01-02", "2023-01-03", "2023-01-04"],
+            "ASSET_01": [0.01, 0.03, -0.01, 0.02],
+            "ASSET_02": [0.02, 0.04, 0.01, -0.01],
+        })
+        df.write_csv(str(csv_path))
+
+        # Create config file pointing to the CSV
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps({
+            "csv": str(csv_path),
+            "weights": [0.6, 0.4],
+            "risk_free_rate": 0.02,
+        }))
+
+        monkeypatch.setattr(sys, "argv", [
+            "portfolio_risk", "--config", str(config_path), "--json",
+        ])
+        main()
+
+        output = json.loads(capsys.readouterr().out)
+        assert output["status"] == "success"
+        assert output["config"]["risk_free_rate"] == 0.02
+
+    def test_default_output_is_summary(self, capsys, monkeypatch, tmp_path):
+        """Default output (no --json flag) should be human-readable summary."""
+        import polars as pl
+
+        csv_path = tmp_path / "test.csv"
+        df = pl.DataFrame({
+            "date": ["2023-01-01", "2023-01-02", "2023-01-03", "2023-01-04"],
+            "ASSET_01": [0.01, 0.03, -0.01, 0.02],
+            "ASSET_02": [0.02, 0.04, 0.01, -0.01],
+        })
+        df.write_csv(str(csv_path))
+
+        monkeypatch.setattr(sys, "argv", [
+            "portfolio_risk", "--csv", str(csv_path), "--weights", "0.6", "0.4",
+        ])
+        main()
+
+        output = capsys.readouterr().out
+        # Summary output should contain human-readable labels, not JSON
+        assert "Portfolio Risk Analysis" in output
+        assert "Sharpe Ratio" in output
+        assert "Asset Volatilities" in output
