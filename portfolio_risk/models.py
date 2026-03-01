@@ -10,7 +10,9 @@ Instead, new instances are created at each pipeline stage:
         → WeightValidationResult (validated weights)
         → RiskMetrics (output)
 """
+
 from __future__ import annotations
+
 from dataclasses import dataclass
 import polars as pl
 
@@ -128,7 +130,9 @@ class RiskMetrics:
     portfolio_variance: float
     annualized_return: float
     sharpe_ratio: float
+    sortino_ratio: float
     max_drawdown: float
+    win_rate: float
     asset_volatilities: tuple[float, ...]
     correlation_matrix: tuple[tuple[float, ...], ...]
 
@@ -143,7 +147,9 @@ class RiskMetrics:
             "portfolio_variance": self.portfolio_variance,
             "annualized_return": self.annualized_return,
             "sharpe_ratio": self.sharpe_ratio,
+            "sortino_ratio": self.sortino_ratio,
             "max_drawdown": self.max_drawdown,
+            "win_rate": self.win_rate,
             # tuple → list because JSON only has arrays (no tuple concept).
             # This conversion happens ONLY here at the output boundary.
             # Inside the pipeline, everything stays as immutable tuples.

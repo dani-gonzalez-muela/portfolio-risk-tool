@@ -14,8 +14,8 @@ error handling explicit (no exceptions) and makes the output predictable.
 """
 
 from __future__ import annotations
-import polars as pl
 
+import polars as pl
 
 from portfolio_risk.models import (
     DataValidationResult,
@@ -29,9 +29,11 @@ from portfolio_risk.metrics import (
     compute_portfolio_variance,
     compute_annualized_return,
     compute_sharpe_ratio,
+    compute_sortino_ratio,
     compute_max_drawdown,
     compute_asset_volatilities,
     compute_correlation_matrix,
+    compute_win_rate,
 )
 
 
@@ -108,7 +110,9 @@ def compute_all_metrics(
         portfolio_variance=compute_portfolio_variance(returns_df, weights),
         annualized_return=compute_annualized_return(returns_df, weights),
         sharpe_ratio=compute_sharpe_ratio(returns_df, weights, config.risk_free_rate),
+        sortino_ratio=compute_sortino_ratio(returns_df, weights, config.risk_free_rate),
         max_drawdown=compute_max_drawdown(returns_df, weights),
+        win_rate=compute_win_rate(returns_df, weights),
         asset_volatilities=compute_asset_volatilities(returns_df),
         correlation_matrix=compute_correlation_matrix(returns_df),
     )

@@ -13,6 +13,8 @@ and compute_portfolio_variance rather than reimplementing their logic.
 This follows the FP principle of building complex functions from simple ones.
 """
 
+from __future__ import annotations
+
 import math
 from functools import reduce
 
@@ -295,3 +297,106 @@ def compute_max_drawdown(
     _, _, max_drawdown = reduce(accumulate_drawdown, daily_portfolio_returns, initial_state)
 
     return max_drawdown
+
+
+def compute_sortino_ratio(
+    returns: pl.DataFrame,
+    weights: tuple[float, ...],
+    risk_free_rate: float = 0.0,
+) -> float:
+    """
+    Compute annualized Sortino ratio (downside risk-adjusted return).
+
+    Formula:
+        Sortino = (r_annual - r_f) / downside_deviation
+
+    Unlike Sharpe, which divides by total volatility, Sortino divides only by
+    the volatility of NEGATIVE returns. This avoids penalizing upside volatility,
+    making it a better measure for asymmetric return distributions.
+
+    Composes compute_annualized_return (FP composability) and computes downside
+    deviation from the negative returns only.
+
+    Convention: returns 0.0 when downside deviation is zero (no negative returns).
+
+    Args:
+        returns: Polars DataFrame where each column is an asset's daily returns.
+        weights: Tuple of asset weights.
+        risk_free_rate: Annualized risk-free rate (default 0.0).
+
+    Returns:
+        Annualized Sortino ratio (float). Returns 0.0 if no negative returns.
+    """
+    # Compose: reuse annualized return calculation
+    annualized_ret = compute_annualized_return(returns, weights)
+
+    # Compute daily portfolio returns for downside deviation
+    asset_names = returns.columns
+    weighted_sum_expr = sum(
+        pl.col(name) * weight
+        for name, weight in zip(asset_names, weights)
+    )
+
+    daily_portfolio_returns = returns.select(
+        weighted_sum_expr.alias("portfolio_return")
+    ).to_series().to_list()
+
+    # Filter to only negative returns using a comprehension (FP: no mutation)
+    negative_returns = tuple(r for r in daily_portfolio_returns if r < 0)
+
+    # Edge case: no negative returns → downside deviation is zero
+    if len(negative_returns) < 2:
+        return 0.0
+
+    # Downside deviation: std of negative returns only × √252
+    # Using ddof=1 (sample std) consistent with the rest of our metrics
+    neg_array = np.array(negative_returns)
+    downside_std = float(np.std(neg_array, ddof=1))
+    downside_deviation = downside_std * math.sqrt(TRADING_DAYS_PER_YEAR)
+
+    if downside_deviation == 0.0:
+        return 0.0
+
+    return (annualized_ret - risk_free_rate) / downside_deviation
+
+
+def compute_win_rate(
+    returns: pl.DataFrame,
+    weights: tuple[float, ...],
+) -> float:
+    """
+    Compute the win rate: fraction of days with positive portfolio returns.
+
+    Formula:
+        win_rate = count(daily_return > 0) / total_days
+
+    A simple but practical metric tracked by trading desks daily. Zero returns
+    are NOT counted as wins (a flat day is not a winning day).
+
+    Uses Polars filtering (FP: no loop, no mutation) to count positive days.
+
+    Args:
+        returns: Polars DataFrame where each column is an asset's daily returns.
+        weights: Tuple of asset weights.
+
+    Returns:
+        Win rate as a float between 0.0 and 1.0.
+    """
+    asset_names = returns.columns
+    weighted_sum_expr = sum(
+        pl.col(name) * weight
+        for name, weight in zip(asset_names, weights)
+    )
+
+    # Compute daily portfolio returns as a Polars Series
+    # Polars note: .select() + .to_series() extracts a single column as a Series
+    portfolio_returns = returns.select(
+        weighted_sum_expr.alias("portfolio_return")
+    ).to_series()
+
+    # Count positive days using Polars expression (no loop)
+    # Polars note: .filter() returns a NEW Series with only matching values
+    n_positive = portfolio_returns.filter(portfolio_returns > 0).len()
+    n_total = portfolio_returns.len()
+
+    return n_positive / n_total

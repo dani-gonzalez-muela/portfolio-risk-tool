@@ -156,7 +156,9 @@ def _print_summary(result: dict) -> None:
     print(f"  Annualized Return:    {metrics['annualized_return']:>8.2%}")
     print(f"  Portfolio Volatility: {volatility:>8.2%}")
     print(f"  Sharpe Ratio:         {metrics['sharpe_ratio']:>8.4f}")
+    print(f"  Sortino Ratio:        {metrics['sortino_ratio']:>8.4f}")
     print(f"  Max Drawdown:         {metrics['max_drawdown']:>8.2%}")
+    print(f"  Win Rate:             {metrics['win_rate']:>8.2%}")
     print(f"  Risk-Free Rate:       {config['risk_free_rate']:>8.2%}")
     print()
 

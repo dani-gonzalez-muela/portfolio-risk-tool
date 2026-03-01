@@ -17,9 +17,11 @@ from portfolio_risk.metrics import (
     compute_portfolio_variance,
     compute_annualized_return,
     compute_sharpe_ratio,
+    compute_sortino_ratio,
     compute_max_drawdown,
     compute_asset_volatilities,
     compute_correlation_matrix,
+    compute_win_rate,
 )
 
 
@@ -353,3 +355,136 @@ class TestLargeDataset:
         assert variance > 0.0
         assert isinstance(sharpe, float)
         assert drawdown <= 0.0
+
+
+# ============================================================
+# Sortino Ratio Tests
+# ============================================================
+# Formula: sortino = (annualized_return - risk_free_rate) / downside_deviation
+# Downside deviation = std of NEGATIVE returns only × √252
+# Key difference from Sharpe: does not penalize upside volatility.
+# Convention: returns 0.0 when downside deviation is zero (no negative returns).
+
+class TestSortinoRatio:
+
+    def test_basic_two_assets(self, basic_returns, basic_weights):
+        """Basic case with hand-calculated downside deviation.
+
+        Daily portfolio returns: [0.014, 0.034, -0.002, 0.008]
+        Negative returns only: [-0.002]
+        Downside std (ddof=1): 0.0 (only one negative value, std is 0 with ddof=0
+            but we treat single negative return: std of [-0.002] with ddof=1 is NaN)
+        Actually with one value, ddof=1 gives NaN. So we need ddof=0 for downside.
+
+        Let's use ddof=0 for downside deviation (population std of negative returns):
+        Downside std = 0.0 (only one value, no deviation)
+        Annualized downside dev = 0.0 × √252 = 0.0
+        Sortino = 0.0 by convention (zero downside deviation)
+
+        Wait — this is a degenerate case. Let's use a dataset with multiple negatives.
+        """
+        # Use a dataset where we can compute downside deviation properly
+        returns = pl.DataFrame({
+            "ASSET_01": [0.02, -0.03, 0.01, -0.02, 0.04, -0.01],
+        })
+        weights = (1.0,)
+        # Negative returns: [-0.03, -0.02, -0.01]
+        # Downside std (ddof=1): std([-0.03, -0.02, -0.01]) = 0.01
+        # Annualized downside dev: 0.01 × √252 = 0.15875
+        # Mean daily return: (0.02 - 0.03 + 0.01 - 0.02 + 0.04 - 0.01) / 6 = 0.001667
+        # Annualized return: 0.001667 × 252 = 0.42
+        # Sortino: 0.42 / 0.15875 = 2.6457
+        result = compute_sortino_ratio(returns, weights, risk_free_rate=0.0)
+        assert result == pytest.approx(2.6457, rel=1e-2)
+
+    def test_no_negative_returns(self):
+        """If there are no negative returns, downside deviation is 0 → Sortino = 0.0."""
+        returns = pl.DataFrame({
+            "ASSET_01": [0.01, 0.02, 0.03, 0.01],
+        })
+        result = compute_sortino_ratio(returns, (1.0,), risk_free_rate=0.0)
+        assert result == 0.0
+
+    def test_all_negative_returns(self):
+        """All negative returns: Sortino should be negative."""
+        returns = pl.DataFrame({
+            "ASSET_01": [-0.02, -0.03, -0.01, -0.04],
+        })
+        result = compute_sortino_ratio(returns, (1.0,), risk_free_rate=0.0)
+        assert result < 0.0
+
+    def test_higher_than_sharpe_with_upside_skew(self):
+        """Sortino should be higher than Sharpe when returns have upside skew.
+
+        If most volatility comes from positive returns, Sharpe penalizes it
+        but Sortino does not. So Sortino > Sharpe for positively skewed returns.
+        """
+        # Mostly small negatives, a few big positives → positive skew
+        returns = pl.DataFrame({
+            "ASSET_01": [-0.005, -0.003, 0.05, -0.002, -0.004, 0.06, -0.001, 0.04],
+        })
+        sharpe = compute_sharpe_ratio(returns, (1.0,), risk_free_rate=0.0)
+        sortino = compute_sortino_ratio(returns, (1.0,), risk_free_rate=0.0)
+        assert sortino > sharpe
+
+    def test_with_risk_free_rate(self):
+        """Sortino with non-zero risk-free rate should reduce the ratio."""
+        returns = pl.DataFrame({
+            "ASSET_01": [0.02, -0.03, 0.01, -0.02, 0.04, -0.01],
+        })
+        sortino_zero_rf = compute_sortino_ratio(returns, (1.0,), risk_free_rate=0.0)
+        sortino_high_rf = compute_sortino_ratio(returns, (1.0,), risk_free_rate=0.05)
+        assert sortino_high_rf < sortino_zero_rf
+
+    def test_zero_returns(self, zero_returns):
+        """Zero returns and zero downside deviation: Sortino should be 0.0."""
+        result = compute_sortino_ratio(zero_returns, (0.5, 0.5), risk_free_rate=0.0)
+        assert result == 0.0
+
+
+# ============================================================
+# Win Rate Tests
+# ============================================================
+# Formula: win_rate = count(daily portfolio returns > 0) / total days
+# Returns a value between 0.0 and 1.0.
+
+class TestWinRate:
+
+    def test_basic_two_assets(self, basic_returns, basic_weights):
+        """Basic case with known positive/negative days.
+
+        Daily portfolio returns: [0.014, 0.034, -0.002, 0.008]
+        Positive days: 3 out of 4
+        Win rate: 3/4 = 0.75
+        """
+        result = compute_win_rate(basic_returns, basic_weights)
+        assert result == pytest.approx(0.75)
+
+    def test_all_positive(self):
+        """All positive returns: win rate = 1.0."""
+        returns = pl.DataFrame({
+            "ASSET_01": [0.01, 0.02, 0.03, 0.01],
+        })
+        result = compute_win_rate(returns, (1.0,))
+        assert result == 1.0
+
+    def test_all_negative(self):
+        """All negative returns: win rate = 0.0."""
+        returns = pl.DataFrame({
+            "ASSET_01": [-0.01, -0.02, -0.03, -0.01],
+        })
+        result = compute_win_rate(returns, (1.0,))
+        assert result == 0.0
+
+    def test_zero_returns_not_counted_as_wins(self, zero_returns):
+        """Zero returns are not positive — win rate should be 0.0."""
+        result = compute_win_rate(zero_returns, (0.5, 0.5))
+        assert result == 0.0
+
+    def test_exactly_half(self):
+        """Equal positive and negative days: win rate = 0.5."""
+        returns = pl.DataFrame({
+            "ASSET_01": [0.01, -0.01, 0.02, -0.02],
+        })
+        result = compute_win_rate(returns, (1.0,))
+        assert result == 0.5
