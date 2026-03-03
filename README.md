@@ -13,6 +13,9 @@ python -m portfolio_risk --csv sample_returns.csv --weights 0.1 0.1 0.1 0.1 0.1 
 # Run with a config file
 python -m portfolio_risk --config portfolio.json
 
+# JSON output instead of summary
+python -m portfolio_risk --csv sample_returns.csv --weights 0.5 0.5 --json
+
 # Run tests
 python -m pytest tests/ -v
 
@@ -45,11 +48,11 @@ portfolio_risk/
 └── __main__.py      # Entry point for python -m portfolio_risk
 
 tests/
-├── test_metrics.py      # 43 tests — hand-calculated expected values, edge cases
-├── test_validators.py   # 18 tests — data quality, weight normalization, edge cases
-├── test_pipeline.py     # 13 tests — detect_assets unit tests + end-to-end integration
-├── test_cli.py          #  8 tests — argument parsing, output format, config mode
-└── test_properties.py   # 16 tests — Hypothesis property-based testing (~2000 random inputs)
+├── test_metrics.py      # 43 unit tests — hand-calculated expected values, edge cases
+├── test_validators.py   # 18 unit tests — data quality, weight normalization, edge cases
+├── test_pipeline.py     # 13 integration tests — detect_assets + end-to-end pipeline
+├── test_cli.py          #  8 E2E tests — argument parsing, output format, config mode
+└── test_properties.py   # 16 unit tests — Hypothesis property-based testing (~2000 random inputs)
 ```
 
 **98 tests, 94% coverage.**
@@ -96,7 +99,9 @@ Polars DataFrames are immutable by default — every operation returns a new Dat
 
 ## Testing Strategy
 
-### Example-Based Tests (test_metrics.py, test_validators.py)
+Tests follow the **testing pyramid**: many fast unit tests at the base, integration tests in the middle, and a few E2E tests at the top.
+
+### Unit Tests (test_metrics.py, test_validators.py, test_properties.py)
 
 Hand-calculated expected values using simple data that can be verified on paper. Covers edge cases like:
 - Zero returns, single asset portfolios
@@ -106,12 +111,10 @@ Hand-calculated expected values using simple data that can be verified on paper.
 - Sortino with exactly 1 negative return (std undefined for n=1)
 - All-NaN assets, assets exceeding NaN threshold
 
-### Property-Based Tests (test_properties.py)
-
-Uses Hypothesis to generate ~2000 random portfolios and verify mathematical invariants:
+Hypothesis property-based tests generate ~2000 random portfolios and verify mathematical invariants:
 - Variance is always non-negative
 - Drawdown is always in [-1, 0]
-- Correlations are always in [-1, 1]
+- Correlations are always in [-1, 1], symmetric, with diagonal of 1s
 - Win rate is always in [0, 1]
 - Renormalized weights always sum to 1.0
 - Sharpe and Sortino are always finite
@@ -122,9 +125,13 @@ During development, Hypothesis discovered that all-zero returns produce NaN corr
 
 End-to-end flow from CSV to output dict, plus unit tests for `detect_assets` and `load_csv`. Verifies that all pieces compose correctly together and that error paths (bad file, bad weights, missing assets) return structured error responses.
 
-### CLI Tests (test_cli.py)
+### E2E Tests (test_cli.py)
 
-Argument parsing, JSON output format, human-readable summary, config file mode, and error messages for common mistakes (wrong weight count includes the asset names and count in the error message).
+Invoke `main()` with real arguments and verify full system behavior: argument parsing, JSON output format, human-readable summary, config file mode, and error messages for common mistakes (wrong weight count includes the asset names and count in the error message).
+
+### Why No Mocking?
+
+The architecture makes mocking unnecessary. Since all core logic is pure functions with no external dependencies, tests call functions directly with test data. The only impure function (`load_csv`) is tested with real temp files via pytest's `tmp_path` fixture — no need to mock file I/O.
 
 ## Data Validation
 
