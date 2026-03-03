@@ -22,7 +22,9 @@ class PortfolioConfig:
 
     Attributes:
         asset_names: Names of assets in the portfolio.
-        weights: Allocation per asset, must sum to 1.0.
+        weights: Allocation per asset, must sum to 1.0. Negative values
+                 represent short positions (e.g., (1.2, -0.2) is 120% long
+                 asset A, 20% short asset B).
         risk_free_rate: Annualized risk-free rate for Sharpe/Sortino (default 0.0).
     """
     asset_names: tuple[str, ...]

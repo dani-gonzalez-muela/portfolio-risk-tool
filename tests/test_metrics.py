@@ -190,6 +190,11 @@ class TestMaxDrawdown:
         result = compute_max_drawdown(returns, (1.0,))
         assert result == pytest.approx(-1.0)
 
+    def test_negative_weights_short_position(self, basic_returns):
+        """Short positions should produce a valid drawdown in [-1, 0]."""
+        result = compute_max_drawdown(basic_returns, (1.2, -0.2))
+        assert -1.0 <= result <= 0.0
+
 
 # ── Asset Volatilities ───────────────────────────────────────
 # std(daily_returns, ddof=1) × √252
@@ -275,6 +280,12 @@ class TestSortinoRatio:
         result = compute_sortino_ratio(returns, (1.0,), risk_free_rate=0.0)
         assert result == 0.0
 
+    def test_single_negative_return(self):
+        """Exactly 1 negative return → std(ddof=1) undefined for n=1 → Sortino = 0.0."""
+        returns = pl.DataFrame({"ASSET_01": [0.01, -0.01, 0.02, 0.03]})
+        result = compute_sortino_ratio(returns, (1.0,), risk_free_rate=0.0)
+        assert result == 0.0
+
     def test_all_negative_returns(self):
         returns = pl.DataFrame({"ASSET_01": [-0.02, -0.03, -0.01, -0.04]})
         result = compute_sortino_ratio(returns, (1.0,), risk_free_rate=0.0)
@@ -299,6 +310,16 @@ class TestSortinoRatio:
     def test_zero_returns(self, zero_returns):
         result = compute_sortino_ratio(zero_returns, (0.5, 0.5), risk_free_rate=0.0)
         assert result == 0.0
+
+    def test_negative_weights_short_position(self):
+        """Short positions should produce a valid finite Sortino."""
+        returns = pl.DataFrame({
+            "ASSET_01": [0.02, -0.03, 0.01, -0.02, 0.04, -0.01],
+            "ASSET_02": [-0.01, 0.02, -0.02, 0.03, -0.01, 0.02],
+        })
+        import math
+        result = compute_sortino_ratio(returns, (1.2, -0.2), risk_free_rate=0.0)
+        assert math.isfinite(result)
 
 
 # ── Win Rate ─────────────────────────────────────────────────
@@ -325,3 +346,8 @@ class TestWinRate:
     def test_exactly_half(self):
         returns = pl.DataFrame({"ASSET_01": [0.01, -0.01, 0.02, -0.02]})
         assert compute_win_rate(returns, (1.0,)) == 0.5
+
+    def test_negative_weights_short_position(self, basic_returns):
+        """Short positions should produce a valid win rate in [0, 1]."""
+        result = compute_win_rate(basic_returns, (1.2, -0.2))
+        assert 0.0 <= result <= 1.0

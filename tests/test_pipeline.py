@@ -8,7 +8,7 @@ Verifies that all pieces compose correctly together.
 import pytest
 import polars as pl
 
-from portfolio_risk.pipeline import run_pipeline, load_csv
+from portfolio_risk.pipeline import run_pipeline, load_csv, detect_assets
 
 
 # ── Fixtures ─────────────────────────────────────────────────
@@ -33,6 +33,49 @@ def csv_with_nans(tmp_path) -> str:
         "ASSET_02": [0.02 if i != 10 else None for i in range(30)],
     }).write_csv(str(csv_path))
     return str(csv_path)
+
+
+
+# -- Detect Assets --
+
+class TestDetectAssets:
+
+    def test_basic_detection(self):
+        df = pl.DataFrame({
+            "date": ["2023-01-01", "2023-01-02"],
+            "ASSET_01": [0.01, 0.02],
+            "ASSET_02": [0.03, 0.04],
+        })
+        assert detect_assets(df) == ("ASSET_01", "ASSET_02")
+
+    def test_excludes_date_column(self):
+        df = pl.DataFrame({
+            "date": ["2023-01-01", "2023-01-02"],
+            "ASSET_01": [0.01, 0.02],
+        })
+        assert "date" not in detect_assets(df)
+
+    def test_excludes_non_numeric_columns(self):
+        df = pl.DataFrame({
+            "date": ["2023-01-01", "2023-01-02"],
+            "ASSET_01": [0.01, 0.02],
+            "notes": ["good", "bad"],
+        })
+        result = detect_assets(df)
+        assert "notes" not in result
+        assert "ASSET_01" in result
+
+    def test_no_numeric_columns(self):
+        df = pl.DataFrame({"date": ["2023-01-01"], "notes": ["ok"]})
+        assert detect_assets(df) == ()
+
+    def test_preserves_column_order(self):
+        df = pl.DataFrame({
+            "date": ["2023-01-01"],
+            "BETA": [0.01],
+            "ALPHA": [0.02],
+        })
+        assert detect_assets(df) == ("BETA", "ALPHA")
 
 
 # ── Pipeline Tests ───────────────────────────────────────────

@@ -71,17 +71,7 @@ def validate_data(raw_df: pl.DataFrame) -> DataValidationResult:
     # Polars types all-null columns as Null dtype — they won't pass is_numeric()
     null_columns = tuple(
         col for col in non_date_columns
-        if raw_df[col].dtype == pl.Null or (
-            not raw_df[col].dtype.is_numeric()
-            and col not in numeric_columns
-            and raw_df[col].null_count() == raw_df.height
-        )
-    )
-
-    # Track non-numeric, non-null columns (e.g., "notes") — silently excluded
-    excluded_non_numeric = tuple(
-        col for col in non_date_columns
-        if col not in numeric_columns and col not in null_columns
+        if raw_df[col].dtype == pl.Null
     )
 
     if len(null_columns) > 0:
