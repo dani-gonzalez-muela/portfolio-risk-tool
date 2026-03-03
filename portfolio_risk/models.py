@@ -1,61 +1,50 @@
 """
 Immutable data structures for the portfolio risk analysis pipeline.
 
-All dataclasses are frozen (immutable once created) to enforce the functional
-programming principle that data should not be modified after creation.
-Instead, new instances are created at each pipeline stage:
+All dataclasses are frozen — data cannot be modified after creation.
+New instances are created at each pipeline stage:
 
-    PortfolioConfig (user input)
-        → DataValidationResult (validated data)
-        → WeightValidationResult (validated weights)
-        → RiskMetrics (output)
+    PortfolioConfig → DataValidationResult → WeightValidationResult → RiskMetrics
 """
 
 from __future__ import annotations
+
 from dataclasses import dataclass
 import polars as pl
 
 
-# ============================================================
-# Input Structures
-# ============================================================
+# ── Input ────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class PortfolioConfig:
     """
-    User-defined portfolio configuration. Created from CLI arguments or portfolio.json.
+    User-defined portfolio configuration, created from CLI arguments.
 
     Attributes:
-        asset_names: Names of assets in the portfolio (e.g., ("ASSET_01", "ASSET_02"))
-        weights: Allocation per asset, must sum to >0 (no pure shorting) and <=1.0 (e.g., (0.5, 0.5)) (no leverage)
-        risk_free_rate: Annualized risk-free rate for Sharpe ratio calculation.
-                        Defaults to 0.0 (excess returns = raw returns).
+        asset_names: Names of assets in the portfolio.
+        weights: Allocation per asset, must sum to 1.0.
+        risk_free_rate: Annualized risk-free rate for Sharpe/Sortino (default 0.0).
     """
     asset_names: tuple[str, ...]
     weights: tuple[float, ...]
     risk_free_rate: float = 0.0
 
 
-# ============================================================
-# Pipeline Data Container
-# ============================================================
+# ── Pipeline Data Container ─────────────────────────────────
 
 @dataclass(frozen=True)
 class ReturnsData:
     """
-    Validated and cleaned returns data. Created after loading and validating the CSV.
+    Validated and cleaned returns data, created after CSV validation.
 
-    This container signals that the data has passed all validation checks
+    Acts as a type-level marker that the data has passed all checks
     (no NaNs, correct columns, numeric values) and is safe for computation.
 
     Attributes:
-        data: Polars DataFrame containing daily returns.
-              # Polars note: unlike pandas, this DataFrame is immutable by default —
-              # operations like .with_columns() return a NEW DataFrame
-              # rather than modifying in place.
+        data: Polars DataFrame of daily returns (immutable by default).
         asset_names: Column names matching the assets in the DataFrame.
-        n_days: Number of trading days (rows) in the dataset.
-        n_assets: Number of assets (columns) in the dataset.
+        n_days: Number of trading days (rows).
+        n_assets: Number of assets (columns).
     """
     data: pl.DataFrame
     asset_names: tuple[str, ...]
@@ -63,23 +52,19 @@ class ReturnsData:
     n_assets: int
 
 
-# ============================================================
-# Validation Result Types
-# ============================================================
-# FP approach to error handling: instead of raising exceptions (side effects),
-# validators return explicit result objects that the caller can inspect.
-# This keeps validation functions pure and testable.
+# ── Validation Result Types ──────────────────────────────────
+# Instead of raising exceptions (side effects), validators return explicit
+# result objects. Keeps validation functions pure and testable.
 
 @dataclass(frozen=True)
 class DataValidationResult:
     """
-    Result of data validation. Returned by validate_data().
+    Result of data validation, returned by validate_data().
 
     Attributes:
         is_valid: True if data passed validation (possibly with warnings).
-        data: Validated ReturnsData if successful, None if validation failed.
-        message: Describes what happened — errors, warnings about dropped
-                 assets, or count of NaN values filled.
+        data: Validated ReturnsData if successful, None on failure.
+        message: What happened — errors, dropped assets, or filled NaNs.
     """
     is_valid: bool
     data: ReturnsData | None
@@ -89,42 +74,29 @@ class DataValidationResult:
 @dataclass(frozen=True)
 class WeightValidationResult:
     """
-    Result of weight validation. Returned by validate_weights().
+    Result of weight validation, returned by validate_weights().
 
-    If assets were dropped during data validation, the corresponding weights
-    are removed and remaining weights are renormalized to sum to 1.0.
+    If assets were dropped during data validation, corresponding weights
+    are removed and remaining weights renormalized to sum to 1.0.
 
     Attributes:
         is_valid: True if weights are valid (possibly after renormalization).
-        config: Validated PortfolioConfig if successful, None if validation failed.
-        message: Describes what happened — errors or renormalization warnings.
+        config: Validated PortfolioConfig if successful, None on failure.
+        message: What happened — errors or renormalization details.
     """
     is_valid: bool
     config: PortfolioConfig | None
     message: str
 
 
-# ============================================================
-# Output Structure
-# ============================================================
+# ── Output ───────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class RiskMetrics:
     """
-    Computed risk metrics for the portfolio. Final output of the pipeline.
+    Computed risk metrics for the portfolio. Final pipeline output.
 
-    All values are annualized where applicable (assuming 252 trading days/year).
-
-    Attributes:
-        portfolio_variance: Annualized portfolio variance (weighted combination of assets).
-        annualized_return: Annualized portfolio return based on mean daily returns.
-        sharpe_ratio: Risk-adjusted return = (annualized_return - risk_free_rate) / volatility.
-        max_drawdown: Largest peak-to-trough decline in cumulative portfolio returns.
-                      Expressed as a negative number (e.g., -0.15 means 15% drawdown).
-        asset_volatilities: Per-asset annualized volatilities, one per asset.
-        correlation_matrix: Pairwise correlation between assets.
-                           # Stored as tuple of tuples rather than a numpy array or list
-                           # to maintain immutability in the output container.
+    All values annualized assuming 252 trading days/year.
     """
     portfolio_variance: float
     annualized_return: float
@@ -136,12 +108,7 @@ class RiskMetrics:
     correlation_matrix: tuple[tuple[float, ...], ...]
 
     def to_dict(self) -> dict:
-        """
-        Convert metrics to a JSON-serializable dictionary.
-
-        Pure transformation — no side effects, just restructures data.
-        This is the final step before JSON output in the pipeline.
-        """
+        """Convert to a JSON-serializable dict. Pure transformation."""
         return {
             "portfolio_variance": self.portfolio_variance,
             "annualized_return": self.annualized_return,
@@ -149,10 +116,7 @@ class RiskMetrics:
             "sortino_ratio": self.sortino_ratio,
             "max_drawdown": self.max_drawdown,
             "win_rate": self.win_rate,
-            # tuple → list because JSON only has arrays (no tuple concept).
-            # This conversion happens ONLY here at the output boundary.
-            # Inside the pipeline, everything stays as immutable tuples.
+            # tuple → list at the output boundary for JSON compatibility
             "asset_volatilities": list(self.asset_volatilities),
-            # Same idea: tuple of tuples → list of lists for JSON compatibility.
             "correlation_matrix": [list(row) for row in self.correlation_matrix],
         }
