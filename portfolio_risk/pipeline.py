@@ -2,15 +2,13 @@
 Pipeline composition: chains all steps from CSV loading to metric output.
 
 Architecture: "functional core, imperative shell"
-    - load_csv() is the ONLY impure function (file I/O) — the "shell"
-    - Everything after loading is pure function composition — the "core"
+    - load_csv() is the ONLY impure function (file I/O)
+    - Everything after loading is pure function composition
 
-Pipeline flow:
-    load_csv → validate_data → validate_weights → compute_all_metrics → to_dict
+Flow: load_csv → validate_data → validate_weights → compute_all_metrics → to_dict
 
-The main entry point is run_pipeline(), which returns a JSON-serializable dict
-containing either the computed metrics or an error message. This keeps all
-error handling explicit (no exceptions) and makes the output predictable.
+run_pipeline() returns a JSON-serializable dict with either computed metrics
+or an error message. No exceptions — explicit error handling throughout.
 """
 
 from __future__ import annotations
@@ -26,6 +24,7 @@ from portfolio_risk.models import (
 )
 from portfolio_risk.validators import validate_data, validate_weights
 from portfolio_risk.metrics import (
+    compute_daily_portfolio_returns,
     compute_portfolio_variance,
     compute_annualized_return,
     compute_sharpe_ratio,
@@ -37,19 +36,13 @@ from portfolio_risk.metrics import (
 )
 
 
-# ============================================================
-# Impure Shell: File I/O
-# ============================================================
+# ── Impure Shell: File I/O ───────────────────────────────────
 
 def load_csv(file_path: str) -> pl.DataFrame | None:
     """
     Load a CSV file into a Polars DataFrame.
 
-    This is the ONLY impure function in the pipeline — it performs file I/O.
-    All other functions are pure (same inputs → same outputs, no side effects).
-
-    Polars note: pl.read_csv() is the equivalent of pd.read_csv().
-    Unlike pandas, the resulting DataFrame is immutable by default.
+    The ONLY impure function in the pipeline — everything else is pure.
 
     Args:
         file_path: Path to the CSV file.
@@ -67,14 +60,13 @@ def detect_assets(df: pl.DataFrame) -> tuple[str, ...]:
     """
     Auto-detect asset columns from a DataFrame.
 
-    Pure function: identifies numeric columns, excludes 'date' column.
-    Returns asset names in the order they appear in the CSV.
+    Identifies numeric columns, excludes 'date'. Returns names in column order.
 
     Args:
         df: Raw Polars DataFrame loaded from CSV.
 
     Returns:
-        Tuple of asset column names (immutable).
+        Tuple of asset column names.
     """
     return tuple(
         col for col in df.columns
@@ -82,9 +74,7 @@ def detect_assets(df: pl.DataFrame) -> tuple[str, ...]:
     )
 
 
-# ============================================================
-# Pure Core: Metric Computation
-# ============================================================
+# ── Pure Core: Metric Computation ────────────────────────────
 
 def compute_all_metrics(
     returns_data: ReturnsData,
@@ -93,34 +83,35 @@ def compute_all_metrics(
     """
     Compute all risk metrics for the portfolio.
 
-    Pure function: takes validated data and config, returns immutable RiskMetrics.
-    Composes all individual metric functions into a single result.
+    The daily portfolio return series is computed once and shared across
+    all downstream metrics that need it.
 
     Args:
         returns_data: Validated and cleaned returns data.
         config: Validated portfolio configuration with weights.
 
     Returns:
-        Frozen RiskMetrics dataclass containing all computed values.
+        Frozen RiskMetrics dataclass.
     """
     returns_df = returns_data.data
     weights = config.weights
 
+    # Compute once, pass to all consumers
+    portfolio_returns = compute_daily_portfolio_returns(returns_df, weights)
+
     return RiskMetrics(
         portfolio_variance=compute_portfolio_variance(returns_df, weights),
-        annualized_return=compute_annualized_return(returns_df, weights),
-        sharpe_ratio=compute_sharpe_ratio(returns_df, weights, config.risk_free_rate),
-        sortino_ratio=compute_sortino_ratio(returns_df, weights, config.risk_free_rate),
-        max_drawdown=compute_max_drawdown(returns_df, weights),
-        win_rate=compute_win_rate(returns_df, weights),
+        annualized_return=compute_annualized_return(returns_df, weights, portfolio_returns),
+        sharpe_ratio=compute_sharpe_ratio(returns_df, weights, config.risk_free_rate, portfolio_returns),
+        sortino_ratio=compute_sortino_ratio(returns_df, weights, config.risk_free_rate, portfolio_returns),
+        max_drawdown=compute_max_drawdown(returns_df, weights, portfolio_returns),
+        win_rate=compute_win_rate(returns_df, weights, portfolio_returns),
         asset_volatilities=compute_asset_volatilities(returns_df),
         correlation_matrix=compute_correlation_matrix(returns_df),
     )
 
 
-# ============================================================
-# Pipeline Composition
-# ============================================================
+# ── Pipeline Composition ────────────────────────────────────
 
 def run_pipeline(
     file_path: str,
@@ -131,37 +122,26 @@ def run_pipeline(
     """
     Run the full portfolio risk analysis pipeline.
 
-    Chains: load → validate_data → validate_weights → compute_metrics → to_dict
-
-    Each step checks the result of the previous step before proceeding.
-    If any step fails, the pipeline returns an error dict immediately
-    (no exceptions — explicit FP-style error handling).
+    Each step checks the previous result before proceeding. If any step
+    fails, returns an error dict immediately (no exceptions).
 
     Args:
         file_path: Path to CSV file with daily returns.
-        weights: User-provided portfolio weights (one per asset).
+        weights: Portfolio weights (one per asset).
         asset_names: Asset names corresponding to the weights.
-        risk_free_rate: Annualized risk-free rate for Sharpe ratio (default 0.0).
+        risk_free_rate: Annualized risk-free rate (default 0.0).
 
     Returns:
-        JSON-serializable dict with either:
-            {"status": "success", "metrics": {...}, "warnings": "..."}
-            {"status": "error", "message": "..."}
+        {"status": "success", "metrics": {...}, ...} or
+        {"status": "error", "message": "..."}
     """
-    # Step 1: Load CSV (impure — file I/O at the boundary)
     raw_df = load_csv(file_path)
     if raw_df is None:
-        return {
-            "status": "error",
-            "message": f"Could not read CSV file: {file_path}",
-        }
+        return {"status": "error", "message": f"Could not read CSV file: {file_path}"}
 
-    # Step 2: Check that user's asset names exist in the CSV
+    # Check that requested assets exist in the CSV
     csv_columns = tuple(raw_df.columns)
-    missing_assets = tuple(
-        asset for asset in asset_names
-        if asset not in csv_columns
-    )
+    missing_assets = tuple(a for a in asset_names if a not in csv_columns)
     if len(missing_assets) > 0:
         return {
             "status": "error",
@@ -171,15 +151,10 @@ def run_pipeline(
             ),
         }
 
-    # Step 3: Validate and clean data (pure)
     data_result: DataValidationResult = validate_data(raw_df)
     if not data_result.is_valid:
-        return {
-            "status": "error",
-            "message": f"Data validation failed: {data_result.message}",
-        }
+        return {"status": "error", "message": f"Data validation failed: {data_result.message}"}
 
-    # Step 4: Validate weights against surviving assets (pure)
     weight_result: WeightValidationResult = validate_weights(
         weights=weights,
         original_assets=asset_names,
@@ -187,16 +162,11 @@ def run_pipeline(
         risk_free_rate=risk_free_rate,
     )
     if not weight_result.is_valid:
-        return {
-            "status": "error",
-            "message": f"Weight validation failed: {weight_result.message}",
-        }
+        return {"status": "error", "message": f"Weight validation failed: {weight_result.message}"}
 
-    # Step 5: Compute all metrics (pure)
     metrics: RiskMetrics = compute_all_metrics(data_result.data, weight_result.config)
 
-    # Step 6: Convert to JSON-serializable dict (pure)
-    # Collect warnings using tuple concatenation (no mutable list)
+    # Collect warnings from validation steps
     warnings = tuple(
         msg for msg, condition in (
             (data_result.message, "dropped" in data_result.message.lower() or "filled" in data_result.message.lower()),

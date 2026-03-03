@@ -50,10 +50,8 @@ def compute_asset_volatilities(returns: pl.DataFrame) -> tuple[float, ...]:
         Tuple of annualized volatilities, one per asset (immutable).
     """
     # Polars note: .std() defaults to ddof=1 (sample std), same as pandas.
-    # .to_series() extracts a single row as a Series when DataFrame has one row.
     daily_stds = returns.select(
         # pl.all() selects every column — like applying a function across all assets.
-        # This is the Polars equivalent of df.std() in pandas.
         pl.all().std()
     )
 
@@ -73,20 +71,18 @@ def compute_correlation_matrix(returns: pl.DataFrame) -> tuple[tuple[float, ...]
         returns: Polars DataFrame where each column is an asset's daily returns.
 
     Returns:
-        Tuple of tuples (immutable 2D matrix). Diagonal values = 1.0,
-        matrix is symmetric: corr[i][j] == corr[j][i].
+        Tuple of tuples (immutable 2D matrix). 
     """
     # Polars note: Polars' correlation API varies across versions, so we use
     # numpy's corrcoef which is stable and well-tested. We convert via .to_numpy()
-    # (Polars equivalent of pandas .values).
     returns_matrix = returns.to_numpy()
 
     # np.corrcoef expects each ROW to be a variable, so we transpose.
     corr_array = np.corrcoef(returns_matrix.T)
 
-    # Handle single asset edge case: np.corrcoef returns a scalar-like 2D array
-    if returns.width == 1:
-        return ((1.0,),)
+    # Handle single asset: np.corrcoef returns a 0-d or weird-shaped array
+    if corr_array.ndim == 0:
+        corr_array = np.array([[1.0]])
 
     # Convert numpy array to tuple of tuples for immutability.
     return tuple(
@@ -120,12 +116,9 @@ def compute_portfolio_variance(
         Annualized portfolio variance (float).
     """
     # Convert to numpy for matrix math — Polars doesn't have built-in
-    # covariance matrix computation. We use np.cov with ddof=1 (sample covariance).
-    # .to_numpy() is the Polars equivalent of pandas .values
     returns_matrix = returns.to_numpy()
 
     # np.cov expects each ROW to be a variable, so we transpose.
-    # rowvar=True means each row is a variable (asset), each column is an observation (day).
     cov_matrix = np.cov(returns_matrix.T, ddof=1)
 
     # Handle single asset: np.cov returns a scalar instead of a matrix
@@ -160,8 +153,6 @@ def compute_annualized_return(
     """
     # Compute weighted portfolio return for each day using Polars expressions.
     # pl.col(name) * weight creates a weighted column, then we sum across assets.
-    # Polars note: this is like (df * weights).sum(axis=1) in pandas,
-    # but expressed as explicit column operations — more readable and no mutation.
     asset_names = returns.columns
     weighted_sum_expr = sum(
         pl.col(name) * weight
@@ -170,7 +161,6 @@ def compute_annualized_return(
 
     # .select() computes the expression and returns a new DataFrame (immutable).
     # .mean() aggregates to a single value.
-    # Polars note: chaining .select().mean() is like pandas df.assign(...).mean()
     daily_mean = returns.select(
         weighted_sum_expr.alias("portfolio_return")
     ).mean().item()

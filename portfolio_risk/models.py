@@ -12,7 +12,6 @@ Instead, new instances are created at each pipeline stage:
 """
 
 from __future__ import annotations
-
 from dataclasses import dataclass
 import polars as pl
 
@@ -24,11 +23,11 @@ import polars as pl
 @dataclass(frozen=True)
 class PortfolioConfig:
     """
-    User-defined portfolio configuration. Created from CLI arguments.
+    User-defined portfolio configuration. Created from CLI arguments or portfolio.json.
 
     Attributes:
         asset_names: Names of assets in the portfolio (e.g., ("ASSET_01", "ASSET_02"))
-        weights: Allocation per asset, must sum to 1.0 (e.g., (0.5, 0.5))
+        weights: Allocation per asset, must sum to >0 (no pure shorting) and <=1.0 (e.g., (0.5, 0.5)) (no leverage)
         risk_free_rate: Annualized risk-free rate for Sharpe ratio calculation.
                         Defaults to 0.0 (excess returns = raw returns).
     """

@@ -1,11 +1,9 @@
-# Requires Python >= 3.9
-# Uses `from __future__ import annotations` for Python 3.9 compatibility
-# with modern type hint syntax (X | None). Python 3.10+ does not need this.
+# Python >= 3.9 (uses `from __future__ import annotations` for 3.9 compat)
 
-# Core dependencies
 polars>=1.0.0
 numpy>=1.24.0
 
-# Development / testing
+# Testing
 pytest>=8.0.0
 pytest-cov>=5.0.0
+hypothesis>=6.0.0

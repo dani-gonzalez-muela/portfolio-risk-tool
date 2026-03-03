@@ -5,13 +5,16 @@ A command-line tool that analyzes a portfolio of assets for risk metrics, built 
 ## Quick Start
 
 ```bash
-# Clone and install
-git clone <repo-url>
-cd portfolio-risk-tool
-pip install polars numpy pytest pytest-cov
+pip install polars numpy pytest pytest-cov hypothesis
 
-# Run the tool
+# Run with CLI args
 python -m portfolio_risk --csv sample_returns.csv --weights 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1
+
+# Run with a config file
+python -m portfolio_risk --config portfolio.json
+
+# JSON output instead of summary
+python -m portfolio_risk --csv sample_returns.csv --weights 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 --json
 
 # Run tests
 python -m pytest tests/ -v
@@ -20,52 +23,17 @@ python -m pytest tests/ -v
 python -m pytest tests/ --cov=portfolio_risk --cov-report=term-missing
 ```
 
-## Example Output
+## Metrics
 
-```json
-{
-  "status": "success",
-  "config": {
-    "asset_names": ["ASSET_01", "ASSET_02", "ASSET_03", "..."],
-    "weights": [0.1, 0.1, 0.1, "..."],
-    "risk_free_rate": 0.0
-  },
-  "metrics": {
-    "portfolio_variance": 0.004487,
-    "annualized_return": 0.0815,
-    "sharpe_ratio": 1.2167,
-    "max_drawdown": -0.0871,
-    "asset_volatilities": [0.0782, 0.1128, "..."],
-    "correlation_matrix": [["..."]]
-  },
-  "warnings": "Filled 15 NaN values with 0.0 (assumed no price movement)."
-}
-```
+All metrics annualized assuming 252 trading days/year.
 
-## CLI Usage
-
-```bash
-# Basic usage (equal-weighted portfolio)
-python -m portfolio_risk --csv sample_returns.csv --weights 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1
-
-# With custom risk-free rate
-python -m portfolio_risk --csv sample_returns.csv --weights 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 --risk-free-rate 0.02
-
-# Help
-python -m portfolio_risk --help
-```
-
-The tool auto-detects asset columns from the CSV. Weights are assigned in column order. If the weight count doesn't match, you'll get a friendly error listing the detected assets.
-
-## Metrics Computed
-
-All metrics are annualized assuming 252 trading days per year.
-
-- **Portfolio Variance**: `σ² = wᵀΣw × 252` — weighted combination of asset covariances
+- **Portfolio Variance**: `wᵀΣw × 252` — weighted covariance
 - **Annualized Return**: `mean(daily portfolio returns) × 252`
-- **Sharpe Ratio**: `(annualized return - risk-free rate) / annualized volatility` — returns 0.0 when volatility is zero
-- **Max Drawdown**: Largest peak-to-trough decline in cumulative portfolio returns, computed via `functools.reduce`
-- **Per-Asset Volatilities**: `std(daily returns, ddof=1) × √252` for each asset
+- **Sharpe Ratio**: `(return - risk_free) / volatility` — returns 0.0 when vol is zero
+- **Sortino Ratio**: Like Sharpe, but only penalizes downside volatility
+- **Max Drawdown**: Largest peak-to-trough decline, computed via `functools.reduce`
+- **Win Rate**: Fraction of days with positive returns
+- **Per-Asset Volatilities**: `std(daily, ddof=1) × √252`
 - **Correlation Matrix**: Pairwise Pearson correlation between all assets
 
 ## Architecture
@@ -73,54 +41,58 @@ All metrics are annualized assuming 252 trading days per year.
 ```
 portfolio_risk/
 ├── models.py        # Frozen dataclasses (PortfolioConfig, ReturnsData, RiskMetrics)
-├── metrics.py       # Pure metric functions (variance, Sharpe, drawdown, etc.)
-├── validators.py    # Pure validation (data quality, weight checks)
+├── metrics.py       # Pure metric functions (variance, Sharpe, Sortino, drawdown, etc.)
+├── validators.py    # Pure validation (data quality checks, weight normalization)
 ├── pipeline.py      # Composition: load → validate → compute → output
-├── cli.py           # Imperative shell: argparse, JSON output
+├── cli.py           # Imperative shell: argparse, JSON/summary output
 └── __main__.py      # Entry point for python -m portfolio_risk
 
 tests/
-├── test_metrics.py      # 21 tests — hand-calculated expected values
-├── test_validators.py   # 15 tests — data quality and weight edge cases
+├── test_metrics.py      # 42 tests — hand-calculated expected values
+├── test_validators.py   # 18 tests — data quality and weight edge cases
 ├── test_pipeline.py     #  8 tests — end-to-end integration
-└── test_cli.py          #  6 tests — argument parsing and output format
+├── test_cli.py          #  8 tests — argument parsing and output format
+└── test_properties.py   # 17 tests — Hypothesis property-based testing
 ```
 
-**50 tests | 95% coverage**
+**89 tests total** including ~2000 randomized inputs from Hypothesis.
 
-## Design Principles
+## Functional Programming Design
 
-### Functional Programming
+**Immutability**: All data structures use `@dataclass(frozen=True)` with `tuple` fields instead of `list`. Polars DataFrames are immutable by default — every operation returns a new DataFrame.
 
-- **Immutability**: All data structures are `@dataclass(frozen=True)` with `tuple` fields instead of `list`. Polars DataFrames are immutable by default.
-- **Pure functions**: Every function in `metrics.py` and `validators.py` takes typed inputs and returns typed outputs with no side effects.
-- **Composability**: `compute_sharpe_ratio` composes `compute_annualized_return` and `compute_portfolio_variance` rather than reimplementing their logic. The pipeline chains small pure functions.
-- **Functional error handling**: Validators return explicit result objects (`DataValidationResult`, `WeightValidationResult`) instead of raising exceptions.
-- **Functional core, imperative shell**: All I/O (file reading, CLI args, printing) lives at the edges in `cli.py`. The core logic never touches the filesystem or prints anything.
+**Pure functions**: Every function in `metrics.py` and `validators.py` takes typed inputs and returns typed outputs with no side effects. No file I/O, no printing, no mutation.
 
-### Polars over pandas
+**Composability**: The daily portfolio return series is computed once and shared across all downstream metrics (Sharpe, Sortino, drawdown, win rate). `compute_sharpe_ratio` composes `compute_annualized_return` and `compute_portfolio_variance` rather than reimplementing their logic. The pipeline chains small pure functions: `load → validate_data → validate_weights → compute_all_metrics → to_dict`.
 
-Polars was chosen because its DataFrames are immutable by default — every operation returns a new DataFrame rather than modifying in place. This aligns with the FP approach at the data layer, not just the function layer.
+**FP error handling**: Validators return explicit result objects (`DataValidationResult`, `WeightValidationResult`) instead of raising exceptions. This keeps validation functions pure and makes error paths testable.
 
-### Test-Driven Development
+**Functional core, imperative shell**: All I/O (file reading, CLI parsing, printing) lives at the edges in `cli.py` and `load_csv()`. The core logic never touches the filesystem.
 
-Tests were written before implementation (visible in commit history). Each metric has hand-calculated expected values using simple data that can be verified on paper.
+**No loops**: `compute_max_drawdown` uses `functools.reduce` to carry state through the return sequence. Column operations use Polars expressions and comprehensions.
+
+### Why Polars over pandas
+
+Polars DataFrames are immutable by default — every operation returns a new DataFrame rather than modifying in place. This aligns with the FP approach at the data layer, not just the function layer.
+
+## Testing Strategy
+
+**Example-based tests** (`test_metrics.py`, `test_validators.py`): Hand-calculated expected values using simple data that can be verified on paper. Covers edge cases like zero returns, single assets, negative weights (short positions), total portfolio loss, floating point tolerance.
+
+**Property-based tests** (`test_properties.py`): Uses Hypothesis to generate thousands of random portfolios and verify mathematical invariants — variance is always non-negative, drawdown is always in [-1, 0], correlations are always in [-1, 1], renormalized weights always sum to 1.0. During development, Hypothesis discovered that all-zero returns produce NaN correlations via `np.corrcoef` — an edge case that wouldn't surface from hand-written tests.
+
+**Integration tests** (`test_pipeline.py`): End-to-end flow from CSV to output dict, verifying that all pieces compose correctly.
+
+**CLI tests** (`test_cli.py`): Argument parsing, JSON output format, human-readable summary, config file mode, and error messages.
 
 ## Data Validation
 
-The tool handles real-world data quality issues:
-
-- **Assets with >5% missing data**: Dropped entirely (unreliable), with a warning listing which assets were excluded
-- **Remaining scattered NaNs**: Filled with 0.0 (assumes no price movement — correct for market closures, conservative for data gaps)
-- **Weight renormalization**: If assets are dropped for data quality, corresponding weights are removed and remaining weights renormalized to preserve relative allocation
-- **Non-numeric columns**: Automatically excluded
+- **Assets with >5% missing data**: Dropped entirely with a warning
+- **Remaining NaNs**: Filled with 0.0 (assumes no price movement — correct for market closures, conservative for data gaps)
+- **Weight renormalization**: If assets are dropped, corresponding weights are removed and remaining weights renormalized to preserve relative allocation
+- **Non-numeric columns**: Silently excluded
 - **Friendly errors**: Wrong weight count tells you exactly how many assets were detected and their names
 
 ## Sample Data
 
-`sample_returns.csv` contains 504 trading days (~2 years) of daily returns for 10 fictional assets with:
-- Varying annualized volatilities (8% to 35%)
-- Correlated returns (not independent noise)
-- 15 intentional NaN values for testing data validation
-
-Generated by `generate_sample_data.py` (included for reproducibility).
+`sample_returns.csv` contains 504 trading days (~2 years) of daily returns for 10 fictional assets with varying volatilities (8%–35%), correlated returns, and 15 intentional NaN values. Generated by `generate_sample_data.py` for reproducibility.

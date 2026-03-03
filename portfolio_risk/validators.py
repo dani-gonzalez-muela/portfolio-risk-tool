@@ -1,16 +1,13 @@
 """
 Pure validation functions for data and weight inputs.
 
-FP approach to error handling: instead of raising exceptions (which are side effects),
-these functions return explicit result objects (DataValidationResult, WeightValidationResult)
-that the caller can inspect. This keeps all validation logic pure and testable.
+Instead of raising exceptions (side effects), these return explicit result
+objects that the caller can inspect. Keeps all validation logic pure and testable.
 
-Validation pipeline order:
-    1. validate_data() — checks and cleans the raw DataFrame
+Pipeline order:
+    1. validate_data()   — checks and cleans the raw DataFrame
     2. validate_weights() — checks weights against surviving assets, renormalizes if needed
 """
-
-from __future__ import annotations
 
 from __future__ import annotations
 
@@ -24,75 +21,45 @@ from portfolio_risk.models import (
 )
 
 
-# ============================================================
-# Constants
-# ============================================================
-
-# Assets with more than this fraction of NaN values are dropped.
-# 5% means if an asset has NaN in more than 1 out of every 20 days, it's unreliable.
-NAN_THRESHOLD: float = 0.05
-
-# Minimum number of rows required to compute statistics.
-# Standard deviation with ddof=1 requires at least 2 data points.
-MIN_ROWS: int = 2
-
-# Floating point tolerance for weight sum check.
-# 1/3 + 1/3 + 1/3 = 0.9999999999999999 in Python, so we need a small tolerance.
-WEIGHT_SUM_TOLERANCE: float = 1e-6
+NAN_THRESHOLD: float = 0.05      # assets above 5% NaN are dropped
+MIN_ROWS: int = 2                # std(ddof=1) needs at least 2 data points
+WEIGHT_SUM_TOLERANCE: float = 1e-6  # 1/3 + 1/3 + 1/3 ≈ 0.9999999999999999
 
 
-# ============================================================
-# Data Validation
-# ============================================================
+# ── Data Validation ──────────────────────────────────────────
 
 def validate_data(raw_df: pl.DataFrame) -> DataValidationResult:
     """
     Validate and clean a raw DataFrame of asset returns.
 
     Steps:
-        1. Check DataFrame is not empty
-        2. Check minimum row count (need >= 2 for standard deviation)
-        3. Identify all non-date columns, separate numeric from non-numeric
-        4. Check for columns that are entirely NaN (Polars may type them as Null)
-        5. Drop assets (columns) with >5% NaN values — warn user
-        6. Fill remaining NaNs with 0.0 (assume no price movement)
-        7. Wrap in ReturnsData container
+        1. Reject empty DataFrames or those with < 2 rows
+        2. Separate numeric columns from non-numeric/null columns
+        3. Drop assets with >5% NaN (unreliable data)
+        4. Fill remaining NaNs with 0.0 (assumes no price movement)
+        5. Wrap in ReturnsData container
 
-    Missing data assumption: NaN values below the threshold are filled with 0.0,
-    which assumes no price movement on that day. This is the correct return for
-    days when markets are closed, and a conservative assumption for data gaps
-    (slightly understates volatility). Assets exceeding the NaN threshold are
-    considered unreliable and excluded entirely.
+    NaN fill rationale: 0.0 return is correct for market closures and
+    conservative for data gaps (slightly understates volatility).
 
     Args:
         raw_df: Raw Polars DataFrame, typically from pl.read_csv().
 
     Returns:
-        DataValidationResult with is_valid, cleaned ReturnsData (or None), and message.
+        DataValidationResult with is_valid, cleaned data (or None), and message.
     """
-    # --- Check 1: DataFrame is not empty ---
     if raw_df.width == 0 or raw_df.height == 0:
         return DataValidationResult(
-            is_valid=False,
-            data=None,
+            is_valid=False, data=None,
             message="DataFrame is empty (no rows or no columns).",
         )
 
-    # --- Check 2: Need at least 2 rows for statistics ---
-    # Standard deviation with ddof=1 requires n >= 2, otherwise division by zero.
-    # With only 1 row, variance, volatility, and Sharpe ratio are all undefined.
     if raw_df.height < MIN_ROWS:
         return DataValidationResult(
-            is_valid=False,
-            data=None,
+            is_valid=False, data=None,
             message=f"Need at least {MIN_ROWS} rows to compute statistics, got {raw_df.height}.",
         )
 
-    # --- Check 3: Identify asset columns ---
-    # Separate non-date columns into numeric and non-numeric.
-    # Polars note: columns that are entirely NaN from a CSV may be loaded as
-    # Null type (not Float64), so they won't pass .is_numeric(). We need to
-    # detect these separately and treat them as 100% NaN assets.
     messages = []
     non_date_columns = tuple(col for col in raw_df.columns if col != "date")
 
@@ -101,8 +68,7 @@ def validate_data(raw_df: pl.DataFrame) -> DataValidationResult:
         if raw_df[col].dtype.is_numeric()
     )
 
-    # Columns that are entirely null get a Null dtype in Polars — not numeric.
-    # These are effectively 100% NaN assets and should be reported as dropped.
+    # Polars types all-null columns as Null dtype — they won't pass is_numeric()
     null_columns = tuple(
         col for col in non_date_columns
         if raw_df[col].dtype == pl.Null or (
@@ -112,7 +78,7 @@ def validate_data(raw_df: pl.DataFrame) -> DataValidationResult:
         )
     )
 
-    # Columns that are non-numeric and not null (e.g., string columns like "notes")
+    # Track non-numeric, non-null columns (e.g., "notes") — silently excluded
     excluded_non_numeric = tuple(
         col for col in non_date_columns
         if col not in numeric_columns and col not in null_columns
@@ -120,77 +86,43 @@ def validate_data(raw_df: pl.DataFrame) -> DataValidationResult:
 
     if len(null_columns) > 0:
         messages.append(
-            f"Dropped assets with no valid data (100% NaN): "
-            f"{', '.join(null_columns)}."
+            f"Dropped assets with no valid data (100% NaN): {', '.join(null_columns)}."
         )
 
     if len(numeric_columns) == 0:
-        # If there were null columns, mention them in the failure message
-        if len(null_columns) > 0:
-            return DataValidationResult(
-                is_valid=False,
-                data=None,
-                message=f"No valid asset columns. {messages[0]}",
-            )
-        return DataValidationResult(
-            is_valid=False,
-            data=None,
-            message="No numeric asset columns found in DataFrame.",
-        )
+        msg = f"No valid asset columns. {messages[0]}" if null_columns else "No numeric asset columns found in DataFrame."
+        return DataValidationResult(is_valid=False, data=None, message=msg)
 
-    # Create a new DataFrame with only numeric asset columns.
-    # Polars note: .select() returns a NEW DataFrame (immutable operation).
+    # .select() returns a new DataFrame — original untouched
     numeric_df = raw_df.select(numeric_columns)
 
-    # --- Check 4: Identify and drop assets with too many NaNs ---
-    # Count NaN fraction per column
+    # NaN fraction per column
     nan_fractions = {
         col: numeric_df[col].null_count() / numeric_df.height
         for col in numeric_columns
     }
 
-    # Separate assets into "keep" (below threshold) and "drop" (above threshold)
-    # Using tuple comprehensions to stay immutable
-    assets_to_drop = tuple(
-        col for col, frac in nan_fractions.items()
-        if frac > NAN_THRESHOLD
-    )
-    assets_to_keep = tuple(
-        col for col in numeric_columns
-        if col not in assets_to_drop
-    )
+    assets_to_drop = tuple(col for col, frac in nan_fractions.items() if frac > NAN_THRESHOLD)
+    assets_to_keep = tuple(col for col in numeric_columns if col not in assets_to_drop)
 
     if len(assets_to_drop) > 0:
-        drop_details = ", ".join(
-            f"{col} ({nan_fractions[col]:.1%} NaN)"
-            for col in assets_to_drop
-        )
+        drop_details = ", ".join(f"{col} ({nan_fractions[col]:.1%} NaN)" for col in assets_to_drop)
         messages.append(f"Dropped assets exceeding {NAN_THRESHOLD:.0%} NaN threshold: {drop_details}.")
 
-    # Check if any assets survive
     if len(assets_to_keep) == 0:
         return DataValidationResult(
-            is_valid=False,
-            data=None,
+            is_valid=False, data=None,
             message="All assets exceed NaN threshold — no valid data remaining.",
         )
 
-    # Keep only surviving assets
     clean_df = numeric_df.select(assets_to_keep)
 
-    # --- Check 5: Fill remaining NaNs with 0.0 ---
-    # Count remaining NaNs before filling
-    # Polars note: .null_count() returns count of null/NaN per column.
-    # .sum_horizontal() sums across columns into a single value.
+    # Fill surviving NaNs with 0.0
     remaining_nans = clean_df.null_count().sum_horizontal().item()
-
     if remaining_nans > 0:
-        # Polars note: .fill_null(0.0) returns a NEW DataFrame with NaNs replaced.
-        # The original clean_df is not modified (immutability).
         clean_df = clean_df.fill_null(0.0)
         messages.append(f"Filled {remaining_nans} NaN values with 0.0 (assumed no price movement).")
 
-    # --- Wrap in ReturnsData container ---
     if len(messages) == 0:
         messages.append("Data validation passed with no issues.")
 
@@ -201,16 +133,10 @@ def validate_data(raw_df: pl.DataFrame) -> DataValidationResult:
         n_assets=clean_df.width,
     )
 
-    return DataValidationResult(
-        is_valid=True,
-        data=returns_data,
-        message=" ".join(messages),
-    )
+    return DataValidationResult(is_valid=True, data=returns_data, message=" ".join(messages))
 
 
-# ============================================================
-# Weight Validation
-# ============================================================
+# ── Weight Validation ────────────────────────────────────────
 
 def validate_weights(
     weights: tuple[float, ...],
@@ -221,42 +147,34 @@ def validate_weights(
     """
     Validate portfolio weights against the surviving asset list.
 
-    If assets were dropped during data validation, the corresponding weights
-    are removed and remaining weights are renormalized to sum to 1.0.
-    This preserves the user's intended relative allocation.
+    If assets were dropped during data validation, corresponding weights
+    are removed and remaining weights renormalized to preserve the user's
+    intended relative allocation.
 
     Example:
-        Original: ASSET_01=0.4, ASSET_02=0.2, ASSET_03=0.4
-        ASSET_02 dropped → surviving weights: 0.4, 0.4 → renormalized: 0.5, 0.5
+        Original: A=0.4, B=0.2, C=0.4 → B dropped → A=0.5, C=0.5
 
     Args:
         weights: User-provided weights (one per original asset).
         original_assets: All asset names the user provided weights for.
         surviving_assets: Assets that passed data validation.
-        risk_free_rate: Annualized risk-free rate for Sharpe calculation.
+        risk_free_rate: Annualized risk-free rate.
 
     Returns:
-        WeightValidationResult with is_valid, PortfolioConfig (or None), and message.
+        WeightValidationResult with is_valid, config (or None), and message.
     """
-    # --- Check 1: Number of weights matches original assets ---
     if len(weights) != len(original_assets):
         return WeightValidationResult(
-            is_valid=False,
-            config=None,
+            is_valid=False, config=None,
             message=(
                 f"Number of weights ({len(weights)}) does not match "
                 f"number of assets ({len(original_assets)})."
             ),
         )
 
-    # --- Check 2: Handle dropped assets ---
-    # Map each original asset to its weight, then keep only surviving ones.
-    # Using a dict comprehension (immutable operation — creates new dict).
     asset_weight_map = dict(zip(original_assets, weights))
-
     surviving_weights = tuple(
-        asset_weight_map[asset]
-        for asset in surviving_assets
+        asset_weight_map[asset] for asset in surviving_assets
         if asset in asset_weight_map
     )
 
@@ -264,18 +182,14 @@ def validate_weights(
     needs_renormalization = len(surviving_assets) < len(original_assets)
 
     if needs_renormalization:
-        # Renormalize: scale surviving weights so they sum to 1.0
-        # This preserves the user's intended relative allocation.
         weight_sum = sum(surviving_weights)
 
         if weight_sum == 0.0:
             return WeightValidationResult(
-                is_valid=False,
-                config=None,
+                is_valid=False, config=None,
                 message="Surviving asset weights sum to 0.0 — cannot renormalize.",
             )
 
-        # Create new tuple with renormalized weights (immutable)
         renormalized_weights = tuple(w / weight_sum for w in surviving_weights)
 
         dropped = set(original_assets) - set(surviving_assets)
@@ -289,19 +203,16 @@ def validate_weights(
     else:
         final_weights = surviving_weights
 
-    # --- Check 3: Weights must sum to 1.0 (with tolerance) ---
     weight_sum = sum(final_weights)
     if abs(weight_sum - 1.0) > WEIGHT_SUM_TOLERANCE:
         return WeightValidationResult(
-            is_valid=False,
-            config=None,
+            is_valid=False, config=None,
             message=(
                 f"Weights must sum to 1.0, but got {weight_sum:.6f}. "
                 f"Difference: {abs(weight_sum - 1.0):.6f}."
             ),
         )
 
-    # --- Build validated config ---
     if len(messages) == 0:
         messages.append("Weight validation passed.")
 
@@ -311,8 +222,4 @@ def validate_weights(
         risk_free_rate=risk_free_rate,
     )
 
-    return WeightValidationResult(
-        is_valid=True,
-        config=config,
-        message=" ".join(messages),
-    )
+    return WeightValidationResult(is_valid=True, config=config, message=" ".join(messages))

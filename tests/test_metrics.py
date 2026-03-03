@@ -1,13 +1,13 @@
 """
 Test suite for portfolio risk metrics.
 
-These tests were written BEFORE the implementation (TDD: Red phase).
 Each test uses simple, hand-calculable data so expected values can be
-verified on paper. Tests will fail until metrics.py is implemented.
+verified on paper.
 
-Convention: 252 trading days per year for annualization.
-Convention: Zero volatility → Sharpe ratio returns 0.0 (avoids division by zero).
-Convention: Max drawdown is expressed as a negative number (e.g., -0.15 = 15% drawdown).
+Conventions:
+    - 252 trading days/year for annualization
+    - Zero volatility → Sharpe returns 0.0
+    - Max drawdown expressed as negative (e.g., -0.15 = 15% drawdown)
 """
 
 import pytest
@@ -25,18 +25,11 @@ from portfolio_risk.metrics import (
 )
 
 
-# ============================================================
-# Shared test data (fixtures)
-# ============================================================
-# Using pytest fixtures so test data is defined once and reused.
-# This avoids repetition and makes tests easier to maintain.
+# ── Fixtures ─────────────────────────────────────────────────
 
 @pytest.fixture
 def basic_returns() -> pl.DataFrame:
-    """
-    Simple 2-asset, 4-day returns dataset.
-    Small enough to verify all calculations by hand.
-    """
+    """2 assets, 4 days. Small enough to verify by hand."""
     return pl.DataFrame({
         "ASSET_01": [0.01, 0.03, -0.01, 0.02],
         "ASSET_02": [0.02, 0.04, 0.01, -0.01],
@@ -45,21 +38,17 @@ def basic_returns() -> pl.DataFrame:
 
 @pytest.fixture
 def basic_weights() -> tuple:
-    """60/40 allocation across 2 assets."""
+    """60/40 allocation."""
     return (0.6, 0.4)
 
 
 @pytest.fixture
 def single_asset_returns() -> pl.DataFrame:
-    """Single asset — simplest possible case."""
-    return pl.DataFrame({
-        "ASSET_01": [0.01, 0.03, -0.01, 0.02],
-    })
+    return pl.DataFrame({"ASSET_01": [0.01, 0.03, -0.01, 0.02]})
 
 
 @pytest.fixture
 def zero_returns() -> pl.DataFrame:
-    """All returns are zero — tests edge cases around zero variance/volatility."""
     return pl.DataFrame({
         "ASSET_01": [0.0, 0.0, 0.0],
         "ASSET_02": [0.0, 0.0, 0.0],
@@ -75,353 +64,224 @@ def identical_assets_returns() -> pl.DataFrame:
     })
 
 
-# ============================================================
-# Portfolio Variance Tests
-# ============================================================
-# Formula: σ²_portfolio = wᵀ Σ w  (annualized by × 252)
-# where Σ = sample covariance matrix, w = weight vector
+# ── Portfolio Variance ───────────────────────────────────────
+# σ²_portfolio = wᵀ Σ w × 252
 
 class TestPortfolioVariance:
 
     def test_basic_two_assets(self, basic_returns, basic_weights):
-        """Basic case: 2 assets, 4 days, 60/40 weights."""
-        # Hand-calculated: daily var = 0.00023033, annualized = 0.058044
         result = compute_portfolio_variance(basic_returns, basic_weights)
         assert result == pytest.approx(0.058044, rel=1e-4)
 
     def test_single_asset(self, single_asset_returns):
-        """Single asset: portfolio variance = that asset's variance."""
-        # Hand-calculated: sample var of [0.01, 0.03, -0.01, 0.02] × 252 = 0.0735
         result = compute_portfolio_variance(single_asset_returns, (1.0,))
         assert result == pytest.approx(0.0735, rel=1e-4)
 
     def test_zero_returns(self, zero_returns):
-        """All zero returns: variance should be exactly 0."""
         result = compute_portfolio_variance(zero_returns, (0.5, 0.5))
         assert result == 0.0
 
     def test_equal_weights(self, basic_returns):
-        """Equal weighting across assets."""
         result = compute_portfolio_variance(basic_returns, (0.5, 0.5))
-        # Hand-calculated: daily var with equal weights, annualized
         assert result == pytest.approx(0.060375, rel=1e-4)
 
     def test_negative_weights_short_position(self, basic_returns):
-        """Negative weights (short positions) should still produce valid variance."""
-        weights = (1.2, -0.2)
-        result = compute_portfolio_variance(basic_returns, weights)
-        # Short positions increase variance due to leverage
+        """Short positions should still produce valid variance."""
+        result = compute_portfolio_variance(basic_returns, (1.2, -0.2))
         assert result == pytest.approx(0.09610, rel=1e-4)
 
 
-# ============================================================
-# Annualized Return Tests
-# ============================================================
-# Formula: annualized_return = mean(daily portfolio returns) × 252
+# ── Annualized Return ────────────────────────────────────────
+# mean(daily portfolio returns) × 252
 
 class TestAnnualizedReturn:
 
     def test_basic_two_assets(self, basic_returns, basic_weights):
-        """Basic case: weighted mean daily return × 252."""
-        # Daily portfolio returns: [0.014, 0.034, -0.002, 0.008]
-        # Mean = 0.0135, annualized = 0.0135 × 252 = 3.402
+        # Daily returns: [0.014, 0.034, -0.002, 0.008], mean=0.0135, ×252=3.402
         result = compute_annualized_return(basic_returns, basic_weights)
         assert result == pytest.approx(3.402, rel=1e-4)
 
     def test_zero_returns(self, zero_returns):
-        """All zero returns: annualized return should be 0."""
         result = compute_annualized_return(zero_returns, (0.5, 0.5))
         assert result == 0.0
 
     def test_single_asset(self, single_asset_returns):
-        """Single asset: return = mean of that asset's returns × 252."""
-        # Mean of [0.01, 0.03, -0.01, 0.02] = 0.0125, × 252 = 3.15
+        # mean([0.01, 0.03, -0.01, 0.02]) = 0.0125, × 252 = 3.15
         result = compute_annualized_return(single_asset_returns, (1.0,))
         assert result == pytest.approx(3.15, rel=1e-4)
 
 
-# ============================================================
-# Sharpe Ratio Tests
-# ============================================================
-# Formula: sharpe = (annualized_return - risk_free_rate) / annualized_volatility
-# Convention: if volatility = 0, return 0.0
+# ── Sharpe Ratio ─────────────────────────────────────────────
+# (annualized_return - risk_free_rate) / annualized_volatility
 
 class TestSharpeRatio:
 
     def test_basic_zero_risk_free(self, basic_returns, basic_weights):
-        """Sharpe with risk-free rate = 0."""
-        # annualized return = 3.402, vol = 0.24092, sharpe = 3.402 / 0.24092 = 14.1207
         result = compute_sharpe_ratio(basic_returns, basic_weights, risk_free_rate=0.0)
         assert result == pytest.approx(14.1207, rel=1e-3)
 
     def test_with_risk_free_rate(self, basic_returns, basic_weights):
-        """Sharpe with non-zero risk-free rate."""
-        # (3.402 - 0.02) / 0.24092 = 14.0377
         result = compute_sharpe_ratio(basic_returns, basic_weights, risk_free_rate=0.02)
         assert result == pytest.approx(14.0377, rel=1e-3)
 
     def test_zero_volatility_returns_zero(self):
-        """When all returns are identical, volatility = 0 → Sharpe = 0.0 by convention."""
-        # Constant returns: std = 0, so we can't divide
-        constant_returns = pl.DataFrame({
-            "ASSET_01": [0.01, 0.01, 0.01, 0.01],
-        })
-        result = compute_sharpe_ratio(constant_returns, (1.0,), risk_free_rate=0.0)
+        """Constant returns → vol=0 → Sharpe=0.0 by convention."""
+        constant = pl.DataFrame({"ASSET_01": [0.01, 0.01, 0.01, 0.01]})
+        result = compute_sharpe_ratio(constant, (1.0,), risk_free_rate=0.0)
         assert result == 0.0
 
     def test_zero_returns(self, zero_returns):
-        """Zero returns and zero vol: Sharpe should be 0.0."""
         result = compute_sharpe_ratio(zero_returns, (0.5, 0.5), risk_free_rate=0.0)
         assert result == 0.0
 
     def test_negative_average_return(self):
-        """If portfolio loses money on average, Sharpe should be negative."""
-        returns = pl.DataFrame({
-            "ASSET_01": [-0.02, -0.03, 0.01, -0.04, -0.01],
-        })
+        """Losing money on average → negative Sharpe."""
+        returns = pl.DataFrame({"ASSET_01": [-0.02, -0.03, 0.01, -0.04, -0.01]})
         result = compute_sharpe_ratio(returns, (1.0,), risk_free_rate=0.0)
         assert result < 0.0
 
     def test_returns_below_risk_free_rate(self):
-        """Positive returns below risk-free rate should give negative Sharpe."""
-        returns = pl.DataFrame({
-            "ASSET_01": [0.0001, 0.0002, 0.0001, 0.0003, 0.0001],
-        })
-        # Very small positive returns, but risk-free rate is much higher
+        """Positive but tiny returns with high risk-free rate → negative Sharpe."""
+        returns = pl.DataFrame({"ASSET_01": [0.0001, 0.0002, 0.0001, 0.0003, 0.0001]})
         result = compute_sharpe_ratio(returns, (1.0,), risk_free_rate=0.10)
         assert result < 0.0
 
     def test_negative_weights_short_position(self, basic_returns):
-        """Sharpe ratio should work with short positions."""
-        weights = (1.2, -0.2)
-        result = compute_sharpe_ratio(basic_returns, weights, risk_free_rate=0.0)
-        # Leveraged long/short position amplifies both return and risk
+        result = compute_sharpe_ratio(basic_returns, (1.2, -0.2), risk_free_rate=0.0)
         assert result == pytest.approx(9.755, rel=1e-3)
 
 
-# ============================================================
-# Max Drawdown Tests
-# ============================================================
-# Formula: track cumulative returns, find largest peak-to-trough decline.
-# Convention: expressed as negative number (e.g., -0.05 = 5% drawdown).
+# ── Max Drawdown ─────────────────────────────────────────────
+# Largest peak-to-trough decline in cumulative returns
 
 class TestMaxDrawdown:
 
     def test_basic_two_assets(self, basic_returns, basic_weights):
-        """Basic case with a small drawdown in the middle."""
-        # Portfolio returns: [0.014, 0.034, -0.002, 0.008]
         # Cumulative: [1.014, 1.04848, 1.04638, 1.05475]
-        # Drawdown occurs at day 3: (1.04638 - 1.04848) / 1.04848 = -0.002
+        # Drawdown at day 3: (1.04638 - 1.04848) / 1.04848 ≈ -0.002
         result = compute_max_drawdown(basic_returns, basic_weights)
         assert result == pytest.approx(-0.002, abs=1e-4)
 
     def test_always_positive_returns(self):
-        """If returns are always positive, there's never a drawdown."""
-        always_up = pl.DataFrame({
-            "ASSET_01": [0.01, 0.02, 0.03, 0.01],
-        })
-        result = compute_max_drawdown(always_up, (1.0,))
+        returns = pl.DataFrame({"ASSET_01": [0.01, 0.02, 0.03, 0.01]})
+        result = compute_max_drawdown(returns, (1.0,))
         assert result == 0.0
 
     def test_always_negative_returns(self):
-        """Continuous losses: drawdown keeps growing."""
-        always_down = pl.DataFrame({
-            "ASSET_01": [-0.05, -0.03, -0.04, -0.02],
-        })
-        # Initial wealth = 1.0, peak stays at 1.0 since all returns are negative.
         # Cumulative: [0.95, 0.9215, 0.88464, 0.86695]
-        # Max drawdown at the end: (0.86695 - 1.0) / 1.0 = -0.13305
-        result = compute_max_drawdown(always_down, (1.0,))
+        returns = pl.DataFrame({"ASSET_01": [-0.05, -0.03, -0.04, -0.02]})
+        result = compute_max_drawdown(returns, (1.0,))
         assert result == pytest.approx(-0.13305, rel=1e-3)
 
     def test_zero_returns(self, zero_returns):
-        """Zero returns: no movement, no drawdown."""
         result = compute_max_drawdown(zero_returns, (0.5, 0.5))
         assert result == 0.0
 
     def test_recovery_then_worse_drawdown(self):
-        """
-        Two drawdowns: first -15%, recovery to new peak, then -25%.
-        Should find the worst one.
-
-        Wealth trace:
-            Day 1: +10%  → 1.100 (peak: 1.100)
-            Day 2: -15%  → 0.935 (dd: -15.0%)
-            Day 3: +20%  → 1.122 (new peak: 1.122)
-            Day 4: -25%  → 0.842 (dd: -25.0% from peak — this is the worst)
-            Day 5: +5%   → 0.884
-        """
-        returns = pl.DataFrame({
-            "ASSET_01": [0.10, -0.15, 0.20, -0.25, 0.05],
-        })
+        """Two drawdowns: -15% then recovery, then -25%. Should find the worst."""
+        returns = pl.DataFrame({"ASSET_01": [0.10, -0.15, 0.20, -0.25, 0.05]})
         result = compute_max_drawdown(returns, (1.0,))
-        # Second drawdown is worse: (0.8415 - 1.122) / 1.122 = -0.25
         assert result == pytest.approx(-0.25, rel=1e-3)
-        assert result < -0.20  # worse than the first -15% drawdown
+        assert result < -0.20
 
     def test_total_loss(self):
-        """A return of -100% means total loss. Drawdown should be -1.0."""
-        returns = pl.DataFrame({
-            "ASSET_01": [0.05, -1.0, 0.05],
-        })
+        """A -100% return means total loss → drawdown = -1.0."""
+        returns = pl.DataFrame({"ASSET_01": [0.05, -1.0, 0.05]})
         result = compute_max_drawdown(returns, (1.0,))
         assert result == pytest.approx(-1.0)
 
 
-# ============================================================
-# Asset Volatilities Tests
-# ============================================================
-# Formula: per-asset annualized vol = std(daily returns, ddof=1) × √252
+# ── Asset Volatilities ───────────────────────────────────────
+# std(daily_returns, ddof=1) × √252
 
 class TestAssetVolatilities:
 
     def test_basic_two_assets(self, basic_returns):
-        """Check each asset's annualized volatility independently."""
-        # ASSET_01: std([0.01, 0.03, -0.01, 0.02], ddof=1) × √252 = 0.27111
-        # ASSET_02: std([0.02, 0.04, 0.01, -0.01], ddof=1) × √252 = 0.33045
         result = compute_asset_volatilities(basic_returns)
         assert result[0] == pytest.approx(0.27111, rel=1e-3)
         assert result[1] == pytest.approx(0.33045, rel=1e-3)
 
     def test_single_asset(self, single_asset_returns):
-        """Single asset returns a tuple with one element."""
         result = compute_asset_volatilities(single_asset_returns)
         assert len(result) == 1
         assert result[0] == pytest.approx(0.27111, rel=1e-3)
 
     def test_zero_returns(self, zero_returns):
-        """Zero returns: volatility should be 0 for all assets."""
         result = compute_asset_volatilities(zero_returns)
         assert all(v == 0.0 for v in result)
 
 
-# ============================================================
-# Correlation Matrix Tests
-# ============================================================
-# Standard Pearson correlation between each pair of assets.
+# ── Correlation Matrix ───────────────────────────────────────
 
 class TestCorrelationMatrix:
 
     def test_basic_two_assets(self, basic_returns):
-        """Check shape and known correlation value."""
         result = compute_correlation_matrix(basic_returns)
-        # Should be 2x2 matrix
         assert len(result) == 2
         assert len(result[0]) == 2
-        # Diagonal should be 1.0 (asset correlated with itself)
+        # Diagonal = 1.0
         assert result[0][0] == pytest.approx(1.0)
         assert result[1][1] == pytest.approx(1.0)
-        # Off-diagonal: hand-calculated = 0.32817
+        # Off-diagonal
         assert result[0][1] == pytest.approx(0.32817, rel=1e-3)
-        # Matrix should be symmetric
+        # Symmetric
         assert result[0][1] == pytest.approx(result[1][0])
 
     def test_identical_assets(self, identical_assets_returns):
-        """Identical return series: correlation should be exactly 1.0 everywhere."""
         result = compute_correlation_matrix(identical_assets_returns)
         assert result[0][1] == pytest.approx(1.0)
-        assert result[1][0] == pytest.approx(1.0)
 
     def test_single_asset(self, single_asset_returns):
-        """Single asset: 1x1 correlation matrix = [[1.0]]."""
         result = compute_correlation_matrix(single_asset_returns)
         assert len(result) == 1
         assert result[0][0] == pytest.approx(1.0)
 
 
-# ============================================================
-# Large Dataset Tests
-# ============================================================
-# Verifies metrics work at realistic scale, not just tiny test data.
+# ── Large Dataset ────────────────────────────────────────────
 
 class TestLargeDataset:
 
     def test_five_years_of_data(self):
-        """1260 days (~5 years) should compute without errors."""
+        """1260 days (~5 years) should compute without issues."""
         import numpy as np
         rng = np.random.default_rng(42)
         n_days = 1260
-        data = {
+        returns = pl.DataFrame({
             "ASSET_01": rng.normal(0.0003, 0.01, n_days).tolist(),
             "ASSET_02": rng.normal(0.0002, 0.015, n_days).tolist(),
             "ASSET_03": rng.normal(0.0001, 0.02, n_days).tolist(),
-        }
-        returns = pl.DataFrame(data)
+        })
         weights = (0.5, 0.3, 0.2)
 
-        variance = compute_portfolio_variance(returns, weights)
-        sharpe = compute_sharpe_ratio(returns, weights)
-        drawdown = compute_max_drawdown(returns, weights)
-
-        # Seeded RNG (seed=42) gives deterministic values we can verify
-        assert variance == pytest.approx(0.01589, rel=1e-2)
-        assert sharpe == pytest.approx(0.037, rel=1e-1)
-        assert drawdown == pytest.approx(-0.3208, rel=1e-2)
+        assert compute_portfolio_variance(returns, weights) == pytest.approx(0.01589, rel=1e-2)
+        assert compute_sharpe_ratio(returns, weights) == pytest.approx(0.037, rel=1e-1)
+        assert compute_max_drawdown(returns, weights) == pytest.approx(-0.3208, rel=1e-2)
 
 
-# ============================================================
-# Sortino Ratio Tests
-# ============================================================
-# Formula: sortino = (annualized_return - risk_free_rate) / downside_deviation
-# Downside deviation = std of NEGATIVE returns only × √252
-# Key difference from Sharpe: does not penalize upside volatility.
-# Convention: returns 0.0 when downside deviation is zero (no negative returns).
+# ── Sortino Ratio ────────────────────────────────────────────
+# (annualized_return - risk_free_rate) / downside_deviation
 
 class TestSortinoRatio:
 
-    def test_basic_two_assets(self, basic_returns, basic_weights):
-        """Basic case with hand-calculated downside deviation.
-
-        Daily portfolio returns: [0.014, 0.034, -0.002, 0.008]
-        Negative returns only: [-0.002]
-        Downside std (ddof=1): 0.0 (only one negative value, std is 0 with ddof=0
-            but we treat single negative return: std of [-0.002] with ddof=1 is NaN)
-        Actually with one value, ddof=1 gives NaN. So we need ddof=0 for downside.
-
-        Let's use ddof=0 for downside deviation (population std of negative returns):
-        Downside std = 0.0 (only one value, no deviation)
-        Annualized downside dev = 0.0 × √252 = 0.0
-        Sortino = 0.0 by convention (zero downside deviation)
-
-        Wait — this is a degenerate case. Let's use a dataset with multiple negatives.
-        """
-        # Use a dataset where we can compute downside deviation properly
-        returns = pl.DataFrame({
-            "ASSET_01": [0.02, -0.03, 0.01, -0.02, 0.04, -0.01],
-        })
-        weights = (1.0,)
-        # Negative returns: [-0.03, -0.02, -0.01]
-        # Downside std (ddof=1): std([-0.03, -0.02, -0.01]) = 0.01
-        # Annualized downside dev: 0.01 × √252 = 0.15875
-        # Mean daily return: (0.02 - 0.03 + 0.01 - 0.02 + 0.04 - 0.01) / 6 = 0.001667
-        # Annualized return: 0.001667 × 252 = 0.42
-        # Sortino: 0.42 / 0.15875 = 2.6457
-        result = compute_sortino_ratio(returns, weights, risk_free_rate=0.0)
+    def test_with_multiple_negative_returns(self):
+        """Hand-calculated: neg returns [-0.03, -0.02, -0.01], downside std=0.01."""
+        returns = pl.DataFrame({"ASSET_01": [0.02, -0.03, 0.01, -0.02, 0.04, -0.01]})
+        result = compute_sortino_ratio(returns, (1.0,), risk_free_rate=0.0)
         assert result == pytest.approx(2.6457, rel=1e-2)
 
     def test_no_negative_returns(self):
-        """If there are no negative returns, downside deviation is 0 → Sortino = 0.0."""
-        returns = pl.DataFrame({
-            "ASSET_01": [0.01, 0.02, 0.03, 0.01],
-        })
+        """No negative returns → downside deviation is 0 → Sortino = 0.0."""
+        returns = pl.DataFrame({"ASSET_01": [0.01, 0.02, 0.03, 0.01]})
         result = compute_sortino_ratio(returns, (1.0,), risk_free_rate=0.0)
         assert result == 0.0
 
     def test_all_negative_returns(self):
-        """All negative returns: Sortino should be negative."""
-        returns = pl.DataFrame({
-            "ASSET_01": [-0.02, -0.03, -0.01, -0.04],
-        })
+        returns = pl.DataFrame({"ASSET_01": [-0.02, -0.03, -0.01, -0.04]})
         result = compute_sortino_ratio(returns, (1.0,), risk_free_rate=0.0)
         assert result < 0.0
 
     def test_higher_than_sharpe_with_upside_skew(self):
-        """Sortino should be higher than Sharpe when returns have upside skew.
-
-        If most volatility comes from positive returns, Sharpe penalizes it
-        but Sortino does not. So Sortino > Sharpe for positively skewed returns.
-        """
-        # Mostly small negatives, a few big positives → positive skew
+        """Positive skew: most vol is upside → Sortino > Sharpe."""
         returns = pl.DataFrame({
             "ASSET_01": [-0.005, -0.003, 0.05, -0.002, -0.004, 0.06, -0.001, 0.04],
         })
@@ -430,63 +290,38 @@ class TestSortinoRatio:
         assert sortino > sharpe
 
     def test_with_risk_free_rate(self):
-        """Sortino with non-zero risk-free rate should reduce the ratio."""
-        returns = pl.DataFrame({
-            "ASSET_01": [0.02, -0.03, 0.01, -0.02, 0.04, -0.01],
-        })
-        sortino_zero_rf = compute_sortino_ratio(returns, (1.0,), risk_free_rate=0.0)
-        sortino_high_rf = compute_sortino_ratio(returns, (1.0,), risk_free_rate=0.05)
-        assert sortino_high_rf < sortino_zero_rf
+        """Higher risk-free rate should reduce Sortino."""
+        returns = pl.DataFrame({"ASSET_01": [0.02, -0.03, 0.01, -0.02, 0.04, -0.01]})
+        sortino_zero = compute_sortino_ratio(returns, (1.0,), risk_free_rate=0.0)
+        sortino_high = compute_sortino_ratio(returns, (1.0,), risk_free_rate=0.05)
+        assert sortino_high < sortino_zero
 
     def test_zero_returns(self, zero_returns):
-        """Zero returns and zero downside deviation: Sortino should be 0.0."""
         result = compute_sortino_ratio(zero_returns, (0.5, 0.5), risk_free_rate=0.0)
         assert result == 0.0
 
 
-# ============================================================
-# Win Rate Tests
-# ============================================================
-# Formula: win_rate = count(daily portfolio returns > 0) / total days
-# Returns a value between 0.0 and 1.0.
+# ── Win Rate ─────────────────────────────────────────────────
+# count(daily_return > 0) / total_days
 
 class TestWinRate:
 
     def test_basic_two_assets(self, basic_returns, basic_weights):
-        """Basic case with known positive/negative days.
-
-        Daily portfolio returns: [0.014, 0.034, -0.002, 0.008]
-        Positive days: 3 out of 4
-        Win rate: 3/4 = 0.75
-        """
+        # Daily returns: [0.014, 0.034, -0.002, 0.008] → 3/4 positive
         result = compute_win_rate(basic_returns, basic_weights)
         assert result == pytest.approx(0.75)
 
     def test_all_positive(self):
-        """All positive returns: win rate = 1.0."""
-        returns = pl.DataFrame({
-            "ASSET_01": [0.01, 0.02, 0.03, 0.01],
-        })
-        result = compute_win_rate(returns, (1.0,))
-        assert result == 1.0
+        returns = pl.DataFrame({"ASSET_01": [0.01, 0.02, 0.03, 0.01]})
+        assert compute_win_rate(returns, (1.0,)) == 1.0
 
     def test_all_negative(self):
-        """All negative returns: win rate = 0.0."""
-        returns = pl.DataFrame({
-            "ASSET_01": [-0.01, -0.02, -0.03, -0.01],
-        })
-        result = compute_win_rate(returns, (1.0,))
-        assert result == 0.0
+        returns = pl.DataFrame({"ASSET_01": [-0.01, -0.02, -0.03, -0.01]})
+        assert compute_win_rate(returns, (1.0,)) == 0.0
 
     def test_zero_returns_not_counted_as_wins(self, zero_returns):
-        """Zero returns are not positive — win rate should be 0.0."""
-        result = compute_win_rate(zero_returns, (0.5, 0.5))
-        assert result == 0.0
+        assert compute_win_rate(zero_returns, (0.5, 0.5)) == 0.0
 
     def test_exactly_half(self):
-        """Equal positive and negative days: win rate = 0.5."""
-        returns = pl.DataFrame({
-            "ASSET_01": [0.01, -0.01, 0.02, -0.02],
-        })
-        result = compute_win_rate(returns, (1.0,))
-        assert result == 0.5
+        returns = pl.DataFrame({"ASSET_01": [0.01, -0.01, 0.02, -0.02]})
+        assert compute_win_rate(returns, (1.0,)) == 0.5
