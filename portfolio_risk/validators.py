@@ -61,6 +61,7 @@ def validate_data(raw_df: pl.DataFrame) -> DataValidationResult:
         )
 
     messages = []
+    warnings = []
     non_date_columns = tuple(col for col in raw_df.columns if col != "date")
 
     numeric_columns = tuple(
@@ -75,9 +76,9 @@ def validate_data(raw_df: pl.DataFrame) -> DataValidationResult:
     )
 
     if len(null_columns) > 0:
-        messages.append(
-            f"Dropped assets with no valid data (100% NaN): {', '.join(null_columns)}."
-        )
+        msg = f"Dropped assets with no valid data (100% NaN): {', '.join(null_columns)}."
+        messages.append(msg)
+        warnings.append(msg)
 
     if len(numeric_columns) == 0:
         msg = f"No valid asset columns. {messages[0]}" if null_columns else "No numeric asset columns found in DataFrame."
@@ -97,7 +98,9 @@ def validate_data(raw_df: pl.DataFrame) -> DataValidationResult:
 
     if len(assets_to_drop) > 0:
         drop_details = ", ".join(f"{col} ({nan_fractions[col]:.1%} NaN)" for col in assets_to_drop)
-        messages.append(f"Dropped assets exceeding {NAN_THRESHOLD:.0%} NaN threshold: {drop_details}.")
+        msg = f"Dropped assets exceeding {NAN_THRESHOLD:.0%} NaN threshold: {drop_details}."
+        messages.append(msg)
+        warnings.append(msg)
 
     if len(assets_to_keep) == 0:
         return DataValidationResult(
@@ -111,7 +114,9 @@ def validate_data(raw_df: pl.DataFrame) -> DataValidationResult:
     remaining_nans = clean_df.null_count().sum_horizontal().item()
     if remaining_nans > 0:
         clean_df = clean_df.fill_null(0.0)
-        messages.append(f"Filled {remaining_nans} NaN values with 0.0 (assumed no price movement).")
+        msg = f"Filled {remaining_nans} NaN values with 0.0 (assumed no price movement)."
+        messages.append(msg)
+        warnings.append(msg)
 
     if len(messages) == 0:
         messages.append("Data validation passed with no issues.")
@@ -123,7 +128,7 @@ def validate_data(raw_df: pl.DataFrame) -> DataValidationResult:
         n_assets=clean_df.width,
     )
 
-    return DataValidationResult(is_valid=True, data=returns_data, message=" ".join(messages))
+    return DataValidationResult(is_valid=True, data=returns_data, message=" ".join(messages), warnings=tuple(warnings))
 
 
 # ── Weight Validation ────────────────────────────────────────
@@ -169,6 +174,7 @@ def validate_weights(
     )
 
     messages = []
+    warnings = []
     needs_renormalization = len(surviving_assets) < len(original_assets)
 
     if needs_renormalization:
@@ -183,11 +189,13 @@ def validate_weights(
         renormalized_weights = tuple(w / weight_sum for w in surviving_weights)
 
         dropped = set(original_assets) - set(surviving_assets)
-        messages.append(
+        msg = (
             f"Assets dropped during validation: {', '.join(sorted(dropped))}. "
             f"Weights renormalized from {weight_sum:.4f} to 1.0. "
             f"Adjusted weights: {', '.join(f'{w:.4f}' for w in renormalized_weights)}."
         )
+        messages.append(msg)
+        warnings.append(msg)
 
         final_weights = renormalized_weights
     else:
@@ -212,4 +220,4 @@ def validate_weights(
         risk_free_rate=risk_free_rate,
     )
 
-    return WeightValidationResult(is_valid=True, config=config, message=" ".join(messages))
+    return WeightValidationResult(is_valid=True, config=config, message=" ".join(messages), warnings=tuple(warnings))

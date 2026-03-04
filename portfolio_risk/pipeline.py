@@ -5,10 +5,10 @@ Architecture: "functional core, imperative shell"
     - load_csv() is the ONLY impure function (file I/O)
     - Everything after loading is pure function composition
 
-Flow: load_csv → validate_data → validate_weights → compute_all_metrics → to_dict
+Flow: load_csv → validate_data → validate_weights → compute_all_metrics → PipelineResult
 
-run_pipeline() returns a JSON-serializable dict with either computed metrics
-or an error message. No exceptions — explicit error handling throughout.
+run_pipeline() returns a typed PipelineResult (frozen dataclass) with either
+computed metrics or an error message. No exceptions — explicit error handling throughout.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import polars as pl
 
 from portfolio_risk.models import (
     DataValidationResult,
+    PipelineResult,
     PortfolioConfig,
     ReturnsData,
     RiskMetrics,
@@ -118,12 +119,12 @@ def run_pipeline(
     weights: tuple[float, ...],
     asset_names: tuple[str, ...],
     risk_free_rate: float = 0.0,
-) -> dict:
+) -> PipelineResult:
     """
     Run the full portfolio risk analysis pipeline.
 
     Each step checks the previous result before proceeding. If any step
-    fails, returns an error dict immediately (no exceptions).
+    fails, returns an error PipelineResult immediately (no exceptions).
 
     Args:
         file_path: Path to CSV file with daily returns.
@@ -132,28 +133,33 @@ def run_pipeline(
         risk_free_rate: Annualized risk-free rate (default 0.0).
 
     Returns:
-        {"status": "success", "metrics": {...}, ...} or
-        {"status": "error", "message": "..."}
+        PipelineResult (frozen dataclass) with status, metrics, config, and warnings.
     """
     raw_df = load_csv(file_path)
     if raw_df is None:
-        return {"status": "error", "message": f"Could not read CSV file: {file_path}"}
+        return PipelineResult(
+            status="error",
+            message=f"Could not read CSV file: {file_path}",
+        )
 
     # Check that requested assets exist in the CSV
     csv_columns = tuple(raw_df.columns)
     missing_assets = tuple(a for a in asset_names if a not in csv_columns)
     if len(missing_assets) > 0:
-        return {
-            "status": "error",
-            "message": (
+        return PipelineResult(
+            status="error",
+            message=(
                 f"Assets not found in CSV: {', '.join(missing_assets)}. "
                 f"Available columns: {', '.join(csv_columns)}."
             ),
-        }
+        )
 
     data_result: DataValidationResult = validate_data(raw_df)
     if not data_result.is_valid:
-        return {"status": "error", "message": f"Data validation failed: {data_result.message}"}
+        return PipelineResult(
+            status="error",
+            message=f"Data validation failed: {data_result.message}",
+        )
 
     weight_result: WeightValidationResult = validate_weights(
         weights=weights,
@@ -162,26 +168,19 @@ def run_pipeline(
         risk_free_rate=risk_free_rate,
     )
     if not weight_result.is_valid:
-        return {"status": "error", "message": f"Weight validation failed: {weight_result.message}"}
+        return PipelineResult(
+            status="error",
+            message=f"Weight validation failed: {weight_result.message}",
+        )
 
     metrics: RiskMetrics = compute_all_metrics(data_result.data, weight_result.config)
 
-    # Collect warnings from validation steps
-    warnings = tuple(
-        msg for msg, condition in (
-            (data_result.message, "dropped" in data_result.message.lower() or "filled" in data_result.message.lower()),
-            (weight_result.message, "renormalize" in weight_result.message.lower() or "adjusted" in weight_result.message.lower()),
-        )
-        if condition
-    )
+    # Collect warnings from validation steps (structured, no string matching)
+    all_warnings = data_result.warnings + weight_result.warnings
 
-    return {
-        "status": "success",
-        "config": {
-            "asset_names": list(weight_result.config.asset_names),
-            "weights": list(weight_result.config.weights),
-            "risk_free_rate": weight_result.config.risk_free_rate,
-        },
-        "metrics": metrics.to_dict(),
-        "warnings": " ".join(warnings) if warnings else None,
-    }
+    return PipelineResult(
+        status="success",
+        config=weight_result.config,
+        metrics=metrics,
+        warnings=all_warnings,
+    )

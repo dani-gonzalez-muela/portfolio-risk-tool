@@ -67,10 +67,12 @@ class DataValidationResult:
         is_valid: True if data passed validation (possibly with warnings).
         data: Validated ReturnsData if successful, None on failure.
         message: What happened — errors, dropped assets, or filled NaNs.
+        warnings: Structured warning messages for downstream consumers.
     """
     is_valid: bool
     data: ReturnsData | None
     message: str
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -85,10 +87,12 @@ class WeightValidationResult:
         is_valid: True if weights are valid (possibly after renormalization).
         config: Validated PortfolioConfig if successful, None on failure.
         message: What happened — errors or renormalization details.
+        warnings: Structured warning messages for downstream consumers.
     """
     is_valid: bool
     config: PortfolioConfig | None
     message: str
+    warnings: tuple[str, ...] = ()
 
 
 # ── Output ───────────────────────────────────────────────────
@@ -121,4 +125,42 @@ class RiskMetrics:
             # tuple → list at the output boundary for JSON compatibility
             "asset_volatilities": list(self.asset_volatilities),
             "correlation_matrix": [list(row) for row in self.correlation_matrix],
+        }
+
+
+@dataclass(frozen=True)
+class PipelineResult:
+    """
+    Final output of the pipeline. Either a success with metrics or an error.
+
+    Replaces raw dicts with a typed, immutable container — consistent with
+    the FP approach used throughout the rest of the pipeline.
+
+    Attributes:
+        status: "success" or "error".
+        message: Error description (only meaningful when status == "error").
+        config: Portfolio configuration used (None on error).
+        metrics: Computed risk metrics (None on error).
+        warnings: Collected warnings from validation steps.
+    """
+    status: str
+    message: str = ""
+    config: PortfolioConfig | None = None
+    metrics: RiskMetrics | None = None
+    warnings: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict:
+        """Convert to a JSON-serializable dict for CLI output."""
+        if self.status == "error":
+            return {"status": "error", "message": self.message}
+
+        return {
+            "status": "success",
+            "config": {
+                "asset_names": list(self.config.asset_names),
+                "weights": list(self.config.weights),
+                "risk_free_rate": self.config.risk_free_rate,
+            },
+            "metrics": self.metrics.to_dict(),
+            "warnings": " ".join(self.warnings) if self.warnings else None,
         }

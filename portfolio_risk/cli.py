@@ -189,12 +189,14 @@ def main() -> None:
         risk_free_rate=risk_free_rate,
     )
 
-    if use_json:
-        print(json.dumps(result, indent=2))
-    else:
-        _print_summary(result)
+    result_dict = result.to_dict()
 
-    if result["status"] == "error":
+    if use_json:
+        print(json.dumps(result_dict, indent=2))
+    else:
+        _print_summary(result_dict)
+
+    if result_dict["status"] == "error":
         sys.exit(1)
 
 
