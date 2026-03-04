@@ -182,11 +182,13 @@ def main() -> None:
             f"Please provide exactly {len(detected_assets)} weights."
         )
 
+    # Pass pre-loaded DataFrame to avoid double file read
     result = run_pipeline(
         file_path=csv_path,
         weights=weights,
         asset_names=detected_assets,
         risk_free_rate=risk_free_rate,
+        raw_df=raw_df,
     )
 
     result_dict = result.to_dict()

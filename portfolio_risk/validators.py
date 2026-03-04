@@ -62,7 +62,7 @@ def validate_data(raw_df: pl.DataFrame) -> DataValidationResult:
 
     messages = []
     warnings = []
-    non_date_columns = tuple(col for col in raw_df.columns if col != "date")
+    non_date_columns = tuple(col for col in raw_df.columns if col.lower() != "date")
 
     numeric_columns = tuple(
         col for col in non_date_columns

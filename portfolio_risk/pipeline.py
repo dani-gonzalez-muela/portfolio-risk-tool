@@ -71,7 +71,7 @@ def detect_assets(df: pl.DataFrame) -> tuple[str, ...]:
     """
     return tuple(
         col for col in df.columns
-        if col != "date" and df[col].dtype.is_numeric()
+        if col.lower() != "date" and df[col].dtype.is_numeric()
     )
 
 
@@ -119,6 +119,7 @@ def run_pipeline(
     weights: tuple[float, ...],
     asset_names: tuple[str, ...],
     risk_free_rate: float = 0.0,
+    raw_df: pl.DataFrame | None = None,
 ) -> PipelineResult:
     """
     Run the full portfolio risk analysis pipeline.
@@ -131,11 +132,13 @@ def run_pipeline(
         weights: Portfolio weights (one per asset).
         asset_names: Asset names corresponding to the weights.
         risk_free_rate: Annualized risk-free rate (default 0.0).
+        raw_df: Pre-loaded DataFrame (optional, avoids double file read from CLI).
 
     Returns:
         PipelineResult (frozen dataclass) with status, metrics, config, and warnings.
     """
-    raw_df = load_csv(file_path)
+    if raw_df is None:
+        raw_df = load_csv(file_path)
     if raw_df is None:
         return PipelineResult(
             status="error",
